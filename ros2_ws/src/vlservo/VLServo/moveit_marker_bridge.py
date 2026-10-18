@@ -178,7 +178,11 @@ class MoveItMarkerBridge:
         self._tf_listener = TransformListener(
             self._tf_buffer,
             self._node,
-            spin_thread=True,
+            # This node is already serviced by self._executor above.
+            # Starting a second listener executor leaves a background thread
+            # running during rclpy.shutdown() and prints
+            # ExternalShutdownException after a successful task.
+            spin_thread=False,
         )
         self._static_broadcaster = StaticTransformBroadcaster(self._node)
 
@@ -1090,6 +1094,11 @@ class MoveItMarkerBridge:
     # ---------------------------------------------------------------- cleanup
     def destroy(self) -> None:
         try:
+            if getattr(self, "_tf_listener", None) is not None:
+                try:
+                    self._tf_listener.unregister()
+                except Exception:
+                    pass
             if self._active_goal_handle is not None:
                 try:
                     self._active_goal_handle.cancel_goal_async()
@@ -1118,6 +1127,11 @@ class MoveItMarkerBridge:
                 if self._executor is not None:
                     self._executor.remove_node(self._node)
                     self._executor.shutdown()
+            except Exception:
+                pass
+            try:
+                if self._spin_thread is not None:
+                    self._spin_thread.join(timeout=2.0)
             except Exception:
                 pass
             try:
