@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "joint_order": [
+    "waist",
+    "shoulder",
+    "elbow",
+    "forearm_roll",
+    "wrist_angle",
+    "wrist_rotate"
+  ],
+  "poses": {
+    "camera_view_1": {
+      "joint_positions": [
+        0.013805827125906944,
+        -1.1489516496658325,
+        1.1259418725967407,
+        0.0015339808305725455,
+        0.7286409139633179,
+        0.0015339808305725455
+      ],
+      "saved_at": "2026-10-18T22:25:05+0800"
+    }
+  }
+}

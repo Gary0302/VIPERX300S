@@ -1,10 +1,11 @@
 # ViperX-300S 蘋果辨識與抓放
 
-本專案使用 ROS 2 Humble、RealSense、YOLO11s、MoveIt 2 與 Interbotix ViperX-300S。辨識夾取任務的程式與操作文件集中在 `apple_pick/`，模型權重獨立放在 `models/`。開始操作請看 [蘋果辨識與自動抓放操作指南](apple_pick/APPLE_PICK_GUIDE.md)。
+本專案使用 ROS 2 Humble、RealSense、YOLO11s、MoveIt 2 與 Interbotix ViperX-300S。辨識夾取任務的程式與操作文件集中在 `apple_pick/`，模型權重獨立放在 `models/`。開始操作請看 [蘋果辨識與自動抓放操作指南](apple_pick/APPLE_PICK_GUIDE.md)。通用物件夾取系統與完整啟動方式請看 [`general_object_pick/README.md`](general_object_pick/README.md)。目前通用介面已完成視覺、TF、觀察姿勢、夾爪控制，以及使用既有蘋果參數、經規劃與確認後執行的直進夾取與返回測試。
 
 ## 資料夾
 
 - `apple_pick/`：相機啟動、YOLO 辨識、熟蘋果抓放、手眼校正、AprilTag 設定及輔助程式。相機節點本身由 ROS 的 `realsense2_camera` 套件提供，這裡的 `start_camera.sh` 負責啟動它。
+- `general_object_pick/`：通用物件夾取 UI、操作說明與後續開發規劃；和既有蘋果流程分開維護。
 - `models/`：YOLO 權重；正式流程使用 `yolo11s.pt`。
 - `ros2_ws/src/`：ROS 原始碼；建置產物由使用者自行產生。
 - `docker/`：唯一一套 Docker 建置及啟動設定。Docker image 在使用者電腦上建置，不包含在 Git 倉庫中。
@@ -16,7 +17,7 @@
 以下主機端指令從下載後的**專案根目錄**執行，無須使用原作者電腦的路徑。需要 Ubuntu 22.04、Docker Compose、NVIDIA GPU／Container Toolkit、X11，以及已接妥的 ViperX-300S 與 RealSense。Compose 會把目前專案掛載成容器內固定的 `/workspace`。
 
 ```bash
-git clone https://github.com/nthu114033639-lgtm/VIPERX300S-rebuild.git
+git clone https://github.com/jerry12221/VIPERX300S-rebuild.git
 cd VIPERX300S-rebuild
 cd docker
 ./build.sh
