@@ -49,9 +49,9 @@ POSE_FILE = Path(__file__).resolve().parent / "config" / "observation_poses.json
 BASE_FRAME = "vx300s/base_link"
 END_EFFECTOR_LINK = "vx300s/ee_gripper_link"
 OPEN_PWM = 350.0
-CLOSE_PWM = -650.0
-OPEN_HOLD_SECONDS = 1.25
-CLOSE_HOLD_SECONDS = 1.3
+CLOSE_PWM = -500.0
+OPEN_HOLD_SECONDS = 1.0
+CLOSE_HOLD_SECONDS = 1.0
 GRIPPER_SETTLE_SECONDS = 0.5
 ARM_SETTLE_SECONDS = 2.5
 PREGRASP_Z_LIFT_M = 0.05
@@ -63,6 +63,10 @@ APPROACH_DISTANCE_M = 0.03
 OPEN_FINGER_MAX_M = 0.025
 CLOSED_FINGER_MIN_M = 0.030
 FINGER_MOVEMENT_MIN_M = 0.002
+
+
+class GripperVerificationError(RuntimeError):
+    """The PWM command completed, but finger feedback did not verify the motion."""
 
 
 class RobotPoseManager(Node):
@@ -432,16 +436,33 @@ class RobotPoseManager(Node):
             self._set_result("Pick step 5/8: holding at the grasp point for 2.5 seconds.")
             self._wait_with_cancel(ARM_SETTLE_SECONDS)
             self._set_result("Pick step 6/8: closing the gripper.")
-            self._command_gripper(CLOSE_PWM, CLOSE_HOLD_SECONDS, "close")
+            close_verified = True
+            try:
+                self._command_gripper(CLOSE_PWM, CLOSE_HOLD_SECONDS, "close")
+            except GripperVerificationError as error:
+                close_verified = False
+                self._gripper_state = "unverified"
+                self._set_result(
+                    f"Warning: {error} The close command was sent; continuing with "
+                    "the safety retreat and return to start."
+                )
+            # Treat the object as potentially held even when position feedback cannot
+            # verify the close command, so the operator is prompted to release safely.
             self._holding_object = True
             self._set_result("Pick step 7/8: retreating to the pregrasp pose.")
             self._runtime_plan_and_execute(pregrasp_joints, "retreat")
             self._set_result("Pick step 8/8: returning to the original start pose.")
             self._runtime_plan_and_execute(start_joints, "return to start")
-            self._set_result(
-                "Straight pick completed. The arm returned to its original start pose and "
-                "the gripper remains closed."
-            )
+            if close_verified:
+                self._set_result(
+                    "Straight pick completed. The arm returned to its original start pose "
+                    "and the gripper remains closed."
+                )
+            else:
+                self._set_result(
+                    "Straight pick returned to its original start pose, but gripper-close "
+                    "position feedback was not verified. Treat the object as potentially held."
+                )
         except Exception as error:
             self._set_result(str(error))
         finally:
@@ -690,7 +711,7 @@ class RobotPoseManager(Node):
             and after > OPEN_FINGER_MAX_M
             and movement > -FINGER_MOVEMENT_MIN_M
         ):
-            raise RuntimeError(
+            raise GripperVerificationError(
                 "Open PWM was sent, but no opening movement was measured: "
                 f"{before:.4f} -> {after:.4f} m."
             )
@@ -699,7 +720,7 @@ class RobotPoseManager(Node):
             and after < CLOSED_FINGER_MIN_M
             and movement < FINGER_MOVEMENT_MIN_M
         ):
-            raise RuntimeError(
+            raise GripperVerificationError(
                 "Close PWM was sent, but no closing movement was measured: "
                 f"{before:.4f} -> {after:.4f} m."
             )
