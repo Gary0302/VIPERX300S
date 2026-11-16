@@ -43,6 +43,18 @@ JOINT_ORDER = [
     "wrist_angle",
     "wrist_rotate",
 ]
+# Maximum allowed movement for one pick segment.  These limits prevent IK or
+# MoveIt from selecting a distant, equivalent joint-space solution for a
+# nearby Cartesian target.  Keep the values in degrees so they are easy to
+# review and tune from the hardware safety procedure.
+PICK_JOINT_DELTA_LIMIT_DEG = {
+    "waist": 45.0,
+    "shoulder": 60.0,
+    "elbow": 60.0,
+    "forearm_roll": 35.0,
+    "wrist_angle": 60.0,
+    "wrist_rotate": 35.0,
+}
 COMMAND_ENDPOINT = "tcp://127.0.0.1:5561"
 STATUS_ENDPOINT = "tcp://127.0.0.1:5562"
 POSE_FILE = Path(__file__).resolve().parent / "config" / "observation_poses.json"
@@ -584,9 +596,14 @@ class RobotPoseManager(Node):
         by_name = dict(zip(response.solution.joint_state.name, response.solution.joint_state.position))
         if not all(name in by_name for name in JOINT_ORDER):
             raise RuntimeError(f"IK response for {label} omitted an arm joint.")
-        return [float(by_name[name]) for name in JOINT_ORDER]
+        solution = [float(by_name[name]) for name in JOINT_ORDER]
+        self._validate_pick_joint_delta(seed, solution, f"IK for {label}")
+        return solution
 
     def _plan_joint_segment(self, start: list[float], goal_joints: list[float], label: str):
+        self._validate_pick_joint_delta(start, goal_joints, f"target for {label}")
+        if not self._move_group.wait_for_server(timeout_sec=2.0):
+            raise RuntimeError("MoveGroup action server is unavailable.")
         goal = MoveGroup.Goal()
         goal.request.group_name = "interbotix_arm"
         goal.request.num_planning_attempts = 5
@@ -608,6 +625,9 @@ class RobotPoseManager(Node):
             raise RuntimeError(
                 f"MoveIt failed to plan {label} with code {wrapper.result.error_code.val}."
             )
+        self._validate_pick_trajectory(
+            start, wrapper.result.planned_trajectory, label
+        )
         return wrapper.result
 
     def _execute_segment(self, trajectory, label: str) -> None:
@@ -639,54 +659,77 @@ class RobotPoseManager(Node):
             )
 
     def _runtime_plan_and_execute(self, target_joints: list[float], label: str) -> None:
-        """Use MoveGroup plan+execute, matching the proven legacy apple workflow."""
+        """Plan, safety-check, then execute one segment of the pick workflow."""
         self._raise_if_cancelled()
-        if self.current_joints() is None:
-            raise RuntimeError(f"Current joint state is unavailable before {label}.")
-        if not self._move_group.wait_for_server(timeout_sec=2.0):
-            raise RuntimeError("MoveGroup action server is unavailable.")
-
-        goal = MoveGroup.Goal()
-        goal.request.group_name = "interbotix_arm"
-        goal.request.num_planning_attempts = 5
-        goal.request.allowed_planning_time = 5.0
-        goal.request.max_velocity_scaling_factor = 0.10
-        goal.request.max_acceleration_scaling_factor = 0.10
-        goal.request.goal_constraints = [self._joint_constraints(target_joints)]
-        goal.request.start_state.is_diff = True
-        goal.planning_options.plan_only = False
-        goal.planning_options.look_around = False
-        goal.planning_options.replan = False
-
-        handle = self._await(self._move_group.send_goal_async(goal), 10.0)
-        if handle is None or not handle.accepted:
-            raise RuntimeError(f"MoveGroup rejected {label} execution.")
-        self._active_goal_handle = handle
-        wrapper = self._await(handle.get_result_async(), 75.0)
-        self._active_goal_handle = None
-        if wrapper is None:
-            raise RuntimeError(f"MoveGroup timed out during {label}.")
-
-        error_code = wrapper.result.error_code.val
-        if error_code == MoveItErrorCodes.SUCCESS:
-            return
-        joint_error = self._joint_target_error(target_joints)
-        if error_code == MoveItErrorCodes.CONTROL_FAILED and joint_error <= 0.025:
-            self._set_result(
-                f"MoveGroup reported -4 during {label}, but the arm reached the target "
-                f"(max joint error {joint_error:.4f} rad). Continuing."
-            )
-            return
-        raise RuntimeError(
-            f"MoveGroup failed during {label} with code {error_code}; "
-            f"max target joint error was {joint_error:.4f} rad."
-        )
-
-    def _joint_target_error(self, target_joints: list[float]) -> float:
         current = self.current_joints()
         if current is None:
-            return float("inf")
-        return max(abs(actual - goal) for actual, goal in zip(current, target_joints))
+            raise RuntimeError(f"Current joint state is unavailable before {label}.")
+        plan_result = self._plan_joint_segment(current, target_joints, label)
+        self._raise_if_cancelled()
+        self._execute_segment(plan_result.planned_trajectory, label)
+
+    @staticmethod
+    def _validate_pick_joint_delta(
+        start: list[float], goal: list[float], context: str
+    ) -> None:
+        if len(start) != len(JOINT_ORDER) or len(goal) != len(JOINT_ORDER):
+            raise RuntimeError(
+                f"Cannot safety-check {context}: expected {len(JOINT_ORDER)} arm joints."
+            )
+        violations = []
+        for name, start_value, goal_value in zip(JOINT_ORDER, start, goal):
+            delta_deg = math.degrees(abs(float(goal_value) - float(start_value)))
+            limit_deg = PICK_JOINT_DELTA_LIMIT_DEG[name]
+            if delta_deg > limit_deg:
+                violations.append(
+                    f"{name} change {delta_deg:.1f} deg exceeds {limit_deg:.1f} deg limit"
+                )
+        if violations:
+            raise RuntimeError(
+                f"Unsafe {context} rejected: " + "; ".join(violations) + "."
+            )
+
+    @staticmethod
+    def _validate_pick_trajectory(start: list[float], trajectory, label: str) -> None:
+        joint_trajectory = trajectory.joint_trajectory
+        names = list(joint_trajectory.joint_names)
+        if not joint_trajectory.points:
+            raise RuntimeError(f"Cannot safety-check {label}: MoveIt returned no points.")
+        if not all(name in names for name in JOINT_ORDER):
+            raise RuntimeError(f"Cannot safety-check {label}: trajectory omitted an arm joint.")
+        if len(start) != len(JOINT_ORDER):
+            raise RuntimeError(
+                f"Cannot safety-check {label}: expected {len(JOINT_ORDER)} start joints."
+            )
+
+        start_by_name = dict(zip(JOINT_ORDER, (float(value) for value in start)))
+        max_delta_deg = {name: 0.0 for name in JOINT_ORDER}
+        for point in joint_trajectory.points:
+            if len(point.positions) != len(names):
+                raise RuntimeError(
+                    f"Cannot safety-check {label}: trajectory point size is invalid."
+                )
+            point_by_name = dict(zip(names, point.positions))
+            for name in JOINT_ORDER:
+                delta_deg = math.degrees(
+                    abs(float(point_by_name[name]) - start_by_name[name])
+                )
+                max_delta_deg[name] = max(max_delta_deg[name], delta_deg)
+
+        violations = []
+        for name in JOINT_ORDER:
+            limit_deg = PICK_JOINT_DELTA_LIMIT_DEG[name]
+            if max_delta_deg[name] > limit_deg:
+                violations.append(
+                    f"{name} reaches {max_delta_deg[name]:.1f} deg from the segment start "
+                    f"(limit {limit_deg:.1f} deg)"
+                )
+        if violations:
+            raise RuntimeError(
+                f"Unsafe MoveIt trajectory for {label} rejected: "
+                + "; ".join(violations)
+                + "."
+            )
 
     def _trajectory_endpoint_error(self, trajectory) -> float:
         expected = self._trajectory_endpoint(trajectory)
