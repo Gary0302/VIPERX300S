@@ -347,8 +347,8 @@ class ObjectPickPrototype(QMainWindow):
         grid.addWidget(QLabel("Target object"), 2, 0)
         self.target_combo = QComboBox()
         self.target_combo.setEditable(True)
-        self.target_combo.addItems(["bottle", "apple", "tweezers"])
-        self.target_combo.setCurrentText("bottle")
+        self.target_combo.addItems(["apple", "bottle", "tweezers"])
+        self.target_combo.setCurrentText("apple")
         grid.addWidget(self.target_combo, 2, 1, 1, 2)
 
         self.backend_note = QLabel("YOLO is used first for real-time detection and workflow integration.")

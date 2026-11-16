@@ -54,6 +54,7 @@ OPEN_HOLD_SECONDS = 1.0
 CLOSE_HOLD_SECONDS = 1.0
 GRIPPER_SETTLE_SECONDS = 0.5
 ARM_SETTLE_SECONDS = 2.5
+BATCH_RELEASE_DELAY_SECONDS = 1.0
 PREGRASP_Z_LIFT_M = 0.05
 APPROACH_DISTANCE_M = 0.03
 # On this physical VX300S, left_finger feedback decreases while the PWM open
@@ -473,8 +474,10 @@ class RobotPoseManager(Node):
             self._runtime_plan_and_execute(start_joints, "return to start")
             if release_after_return:
                 self._set_result(
-                    "Batch release: opening the gripper at the original start pose."
+                    "Batch release: waiting 1.0 second at the original start pose "
+                    "before opening the gripper."
                 )
+                self._wait_with_cancel(BATCH_RELEASE_DELAY_SECONDS)
                 self._command_gripper(OPEN_PWM, OPEN_HOLD_SECONDS, "open")
                 self._holding_object = False
                 if close_verified:

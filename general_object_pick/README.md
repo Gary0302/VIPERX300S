@@ -126,7 +126,7 @@ UI 會自行管理相機與辨識器，不需要另外啟動 RealSense 或 `appl
 
 1. `Backend` 選擇 `YOLO (Phase 1)`。
 2. `Model` 選擇需要的模型，例如 `yolo11s.pt`。
-3. `Target object` 輸入模型支援的類別，例如 `apple` 或 `bottle`。
+3. `Target object` 預設為 `apple`，也可從下拉選單選擇 `bottle`、`tweezers`，或輸入模型支援的其他類別。
 4. 按 `Start Vision`。
 5. 等待 Camera 與 Detector 顯示 `Ready`。
 6. 若手眼 TF 完整，TF 會顯示 `Ready`，座標系應為 `vx300s/base_link`。
@@ -217,7 +217,7 @@ UI 會自行管理相機與辨識器，不需要另外啟動 RealSense 或 `appl
 - 取得畫面內所有有效蘋果座標。
 - 先鎖定信心最高的候選，再以最近位置連續追蹤 10 筆；三軸變動需小於 1.5 公分。
 - 規劃並執行張爪、pregrasp、前進 3 公分、關爪、retreat 及返回起點。
-- 在返回起點後自動張開夾爪。
+- 返回起點後停留 1 秒，再自動張開夾爪。釋放後維持張開，讓下一輪可以直接進入夾取準備；若批次只設定一顆，任務結束後也會保持張開。
 - 丟棄上一輪座標，等待 1.5 秒並重新累積全新的辨識資料，再選下一顆。
 - 達到 `Maximum batch picks`，或完成至少一顆後連續 5 秒找不到剩餘目標時結束。
 
