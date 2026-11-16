@@ -76,6 +76,7 @@ APPROACH_DISTANCE_M = 0.03
 # command is applied and increases while the close command is applied.  These
 # values were confirmed from the real hardware instead of inferred from the
 # MoveIt named-state values.
+OPEN_FINGER_TARGET_M = 0.0165
 OPEN_FINGER_MAX_M = 0.025
 CLOSED_FINGER_MIN_M = 0.030
 FINGER_MOVEMENT_MIN_M = 0.002
@@ -777,12 +778,27 @@ class RobotPoseManager(Node):
         if before is None:
             raise RuntimeError("Gripper joint feedback is unavailable.")
         self._set_gripper_pwm_mode()
+        if action == "open" and before <= OPEN_FINGER_TARGET_M:
+            self._gripper_state = "open"
+            self._holding_object = False
+            self._set_result(
+                "Gripper is already sufficiently open; skipped additional open PWM "
+                f"at left_finger={before:.4f} m to avoid mechanical overtravel."
+            )
+            return
+
         command = JointSingleCommand(name="gripper", cmd=float(pwm))
         stop = JointSingleCommand(name="gripper", cmd=0.0)
         deadline = time.monotonic() + duration
+        stopped_at_open_target = False
         try:
             while time.monotonic() < deadline:
                 self._raise_if_cancelled()
+                if action == "open":
+                    current = self.current_finger_position()
+                    if current is not None and current <= OPEN_FINGER_TARGET_M:
+                        stopped_at_open_target = True
+                        break
                 self._gripper_pwm.publish(command)
                 time.sleep(0.0005)
         finally:
@@ -814,10 +830,17 @@ class RobotPoseManager(Node):
         self._gripper_state = "open" if action == "open" else "closed"
         if action == "open":
             self._holding_object = False
-        self._set_result(
-            f"Gripper {action} verified from left_finger feedback: "
-            f"{before:.4f} -> {after:.4f} m."
-        )
+        if action == "open" and stopped_at_open_target:
+            self._set_result(
+                "Gripper open stopped at the feedback safety target: "
+                f"{before:.4f} -> {after:.4f} m "
+                f"(target {OPEN_FINGER_TARGET_M:.4f} m)."
+            )
+        else:
+            self._set_result(
+                f"Gripper {action} verified from left_finger feedback: "
+                f"{before:.4f} -> {after:.4f} m."
+            )
 
     def _raise_if_cancelled(self) -> None:
         if self._cancel_requested.is_set():
