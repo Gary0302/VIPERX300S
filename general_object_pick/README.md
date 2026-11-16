@@ -201,7 +201,7 @@ UI 會自行管理相機與辨識器，不需要另外啟動 RealSense 或 `appl
 
 自動流程開始後不要再手動按夾爪按鈕。目標超出 X `0.15–0.65 m`、Y `-0.40–0.40 m` 或 Z 低於 `-0.05 m` 時，系統會拒絕規劃。
 
-為避免相近物品卻讓 IK 選到需要大幅旋轉的另一組解，直進夾取另外限制每一段動作相對於該段起點的最大關節轉角：`waist 45°`、`shoulder 60°`、`elbow 60°`、`forearm_roll 35°`、`wrist_angle 60°`、`wrist_rotate 35°`。程式會先檢查 IK 結果，再檢查 MoveIt 軌跡中的每一個點；實際執行時也改成先規劃、通過相同檢查後才送出軌跡。超標時不會移動，UI 會顯示關節名稱、計算角度與限制值；批次模式會停止，不會跳過後繼續夾下一顆。限制定義在 `robot_pose_manager.py` 的 `PICK_JOINT_DELTA_LIMIT_DEG`。
+為避免相近物品卻讓 IK 選到需要大幅繞軸旋轉的另一組解，直進夾取另外限制每一段動作相對於該段起點的最大關節轉角：`waist 45°`、`shoulder 160°`、`elbow 60°`、`forearm_roll 35°`、`wrist_angle 160°`、`wrist_rotate 35°`。其中 `shoulder` 與 `wrist_angle` 是從折疊的相機觀測姿勢展開到水平 apple 夾取姿勢所需的俯仰軸，因此允許約 140° 的既有正常動作；`waist`、`forearm_roll` 與 `wrist_rotate` 仍維持較嚴格限制，防止突然繞軸旋轉。程式會先檢查 IK 結果，再檢查 MoveIt 軌跡中的每一個點；實際執行時也改成先規劃、通過相同檢查後才送出軌跡。超標時不會移動，UI 會顯示關節名稱、計算角度與限制值；批次模式會停止，不會跳過後繼續夾下一顆。限制定義在 `robot_pose_manager.py` 的 `PICK_JOINT_DELTA_LIMIT_DEG`。
 
 這些限制只防止單一夾取段落出現過大的關節位移，不能取代 RViz 路徑確認、碰撞環境或急停。修改限制後，請先使用單顆模式按 `Plan Straight Pick` 檢查四段路徑，再以批次上限 `1` 做低速實機測試。
 

@@ -49,10 +49,13 @@ JOINT_ORDER = [
 # review and tune from the hardware safety procedure.
 PICK_JOINT_DELTA_LIMIT_DEG = {
     "waist": 45.0,
-    "shoulder": 60.0,
+    # Moving from the folded camera pose to the legacy horizontal apple grasp
+    # legitimately changes these two pitch joints by roughly 140 degrees.
+    # Axial rotation joints remain tightly limited below.
+    "shoulder": 160.0,
     "elbow": 60.0,
     "forearm_roll": 35.0,
-    "wrist_angle": 60.0,
+    "wrist_angle": 160.0,
     "wrist_rotate": 35.0,
 }
 COMMAND_ENDPOINT = "tcp://127.0.0.1:5561"
