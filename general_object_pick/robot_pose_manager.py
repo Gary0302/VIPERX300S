@@ -84,6 +84,8 @@ class RobotPoseManager(Node):
         self._pick_pregrasp_joints: list[float] | None = None
         self._pick_grasp_joints: list[float] | None = None
         self._pick_target: dict | None = None
+        self._pick_completion_sequence = 0
+        self._last_pick_success: bool | None = None
         self._holding_object = False
         self._gripper_state = "unknown"
         self._active_goal_handle = None
@@ -189,6 +191,8 @@ class RobotPoseManager(Node):
             pick_plan_ready = bool(self._pick_trajectories)
             holding_object = self._holding_object
             gripper_state = self._gripper_state
+            pick_completion_sequence = self._pick_completion_sequence
+            last_pick_success = self._last_pick_success
             result_history = list(self._result_history)
         try:
             poses = sorted(self._read_pose_data()["poses"])
@@ -205,6 +209,8 @@ class RobotPoseManager(Node):
             "result_sequence": result_sequence,
             "planned_name": planned_name,
             "pick_plan_ready": pick_plan_ready,
+            "pick_completion_sequence": pick_completion_sequence,
+            "last_pick_success": last_pick_success,
             "holding_object": holding_object,
             "gripper_state": gripper_state,
             "finger_position_m": self.current_finger_position(),
@@ -391,7 +397,9 @@ class RobotPoseManager(Node):
         finally:
             self._active_command = None
 
-    def begin_pick(self, current_target: dict) -> dict:
+    def begin_pick(
+        self, current_target: dict, release_after_return: bool = False
+    ) -> dict:
         if self._active_command is not None:
             return {"success": False, "message": "Another robot command is active."}
         if (
@@ -417,10 +425,20 @@ class RobotPoseManager(Node):
             return {"success": False, "message": "Robot moved after planning. Plan the pick again."}
         self._cancel_requested.clear()
         self._active_command = "pick"
-        threading.Thread(target=self._pick_worker, daemon=True).start()
-        return {"success": True, "message": "Straight-pick execution accepted."}
+        threading.Thread(
+            target=self._pick_worker,
+            args=(bool(release_after_return),),
+            daemon=True,
+        ).start()
+        message = (
+            "Batch pick-and-release execution accepted."
+            if release_after_return
+            else "Straight-pick execution accepted."
+        )
+        return {"success": True, "message": message}
 
-    def _pick_worker(self) -> None:
+    def _pick_worker(self, release_after_return: bool = False) -> None:
+        cycle_success = False
         try:
             pregrasp_joints = list(self._pick_pregrasp_joints)
             grasp_joints = list(self._pick_grasp_joints)
@@ -453,7 +471,23 @@ class RobotPoseManager(Node):
             self._runtime_plan_and_execute(pregrasp_joints, "retreat")
             self._set_result("Pick step 8/8: returning to the original start pose.")
             self._runtime_plan_and_execute(start_joints, "return to start")
-            if close_verified:
+            if release_after_return:
+                self._set_result(
+                    "Batch release: opening the gripper at the original start pose."
+                )
+                self._command_gripper(OPEN_PWM, OPEN_HOLD_SECONDS, "open")
+                self._holding_object = False
+                if close_verified:
+                    self._set_result(
+                        "Batch pick cycle completed: returned to the original start pose "
+                        "and released the object."
+                    )
+                else:
+                    self._set_result(
+                        "Batch pick cycle completed and released the object after an "
+                        "unverified close-position warning."
+                    )
+            elif close_verified:
                 self._set_result(
                     "Straight pick completed. The arm returned to its original start pose "
                     "and the gripper remains closed."
@@ -463,9 +497,13 @@ class RobotPoseManager(Node):
                     "Straight pick returned to its original start pose, but gripper-close "
                     "position feedback was not verified. Treat the object as potentially held."
                 )
+            cycle_success = True
         except Exception as error:
             self._set_result(str(error))
         finally:
+            with self._lock:
+                self._pick_completion_sequence += 1
+                self._last_pick_success = cycle_success
             self._active_command = None
             self._invalidate_pick_plan()
 
@@ -865,7 +903,10 @@ def main() -> int:
                             str(request.get("profile", "")),
                         )
                     elif command == "execute_pick":
-                        response = node.begin_pick(request.get("target", {}))
+                        response = node.begin_pick(
+                            request.get("target", {}),
+                            bool(request.get("release_after_return", False)),
+                        )
                     elif command == "release_object":
                         response = node.begin_gripper_command("open")
                     elif command == "open_gripper":

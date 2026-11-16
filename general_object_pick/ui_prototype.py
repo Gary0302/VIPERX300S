@@ -8,6 +8,7 @@ operator confirmation.
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import subprocess
@@ -33,6 +34,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -232,6 +234,15 @@ class ObjectPickPrototype(QMainWindow):
         self.holding_object = False
         self.planned_pick_target: dict | None = None
         self.target_history = deque(maxlen=12)
+        self.last_pick_completion_sequence = 0
+        self.batch_active = False
+        self.batch_state = "idle"
+        self.batch_completed = 0
+        self.batch_target_history = deque(maxlen=10)
+        self.batch_current_target: dict | None = None
+        self.batch_processed_targets: list[dict[str, float]] = []
+        self.batch_next_detection_time = 0.0
+        self.batch_wait_started = 0.0
         self._build_ui()
         self._apply_style()
         self.refresh_models()
@@ -410,15 +421,28 @@ class ObjectPickPrototype(QMainWindow):
 
         workflow = QGroupBox("5. Workflow")
         workflow_layout = QGridLayout(workflow)
+        workflow_layout.addWidget(QLabel("Pick mode"), 0, 0)
+        self.pick_mode_combo = QComboBox()
+        self.pick_mode_combo.addItem("Single Pick (Keep Holding)", "single")
+        self.pick_mode_combo.addItem("Batch Pick and Release", "batch")
+        self.pick_mode_combo.currentIndexChanged.connect(self.pick_mode_changed)
+        workflow_layout.addWidget(self.pick_mode_combo, 0, 1)
+        workflow_layout.addWidget(QLabel("Maximum batch picks"), 1, 0)
+        self.batch_max_spin = QSpinBox()
+        self.batch_max_spin.setRange(1, 20)
+        self.batch_max_spin.setValue(3)
+        workflow_layout.addWidget(self.batch_max_spin, 1, 1)
         self.vision_button = QPushButton("Start Vision")
         self.robot_button = QPushButton("Start Robot")
         self.preview_button = QPushButton("Preview Target")
         self.plan_pick_button = QPushButton("Plan Straight Pick")
         self.pick_button = QPushButton("Confirm and Pick")
+        self.batch_pick_button = QPushButton("Confirm and Start Batch")
         self.stop_button = QPushButton("Stop Vision / Cancel Motion")
         self.emergency_button = QPushButton("Emergency Stop")
         self.plan_pick_button.setEnabled(False)
         self.pick_button.setEnabled(False)
+        self.batch_pick_button.setEnabled(False)
         self.emergency_button.setObjectName("emergencyButton")
 
         self.vision_button.clicked.connect(self.start_vision)
@@ -426,16 +450,18 @@ class ObjectPickPrototype(QMainWindow):
         self.preview_button.clicked.connect(self.preview_target)
         self.plan_pick_button.clicked.connect(self.plan_straight_pick)
         self.pick_button.clicked.connect(self.confirm_and_pick)
+        self.batch_pick_button.clicked.connect(self.start_batch_pick)
         self.stop_button.clicked.connect(self.stop_workflow)
         self.emergency_button.clicked.connect(self.emergency_stop)
 
-        workflow_layout.addWidget(self.vision_button, 0, 0)
-        workflow_layout.addWidget(self.robot_button, 0, 1)
-        workflow_layout.addWidget(self.preview_button, 1, 0)
-        workflow_layout.addWidget(self.plan_pick_button, 1, 1)
-        workflow_layout.addWidget(self.pick_button, 2, 0, 1, 2)
-        workflow_layout.addWidget(self.stop_button, 3, 0)
-        workflow_layout.addWidget(self.emergency_button, 3, 1)
+        workflow_layout.addWidget(self.vision_button, 2, 0)
+        workflow_layout.addWidget(self.robot_button, 2, 1)
+        workflow_layout.addWidget(self.preview_button, 3, 0)
+        workflow_layout.addWidget(self.plan_pick_button, 3, 1)
+        workflow_layout.addWidget(self.pick_button, 4, 0, 1, 2)
+        workflow_layout.addWidget(self.batch_pick_button, 5, 0, 1, 2)
+        workflow_layout.addWidget(self.stop_button, 6, 0)
+        workflow_layout.addWidget(self.emergency_button, 6, 1)
         layout.addWidget(workflow)
         layout.addStretch()
         panel.setMinimumHeight(675)
@@ -660,6 +686,7 @@ class ObjectPickPrototype(QMainWindow):
 
     def detector_finished(self, exit_code: int) -> None:
         was_running = self.detector_process is not None
+        self._finish_batch("Detector stopped; batch workflow cancelled.", error=True)
         self.detector_process = None
         if was_running:
             if self.image_worker is not None:
@@ -681,6 +708,7 @@ class ObjectPickPrototype(QMainWindow):
                     "Check whether the model contains the selected target class."
                 )
         self.start_button_state(False)
+        self._update_pick_controls()
 
     def update_image(self, image: QImage) -> None:
         self.last_image = image
@@ -737,6 +765,7 @@ class ObjectPickPrototype(QMainWindow):
             )
         else:
             self.target_history.clear()
+        self._update_batch_detection(status)
         self._update_pick_controls()
 
     def vision_error(self, message: str) -> None:
@@ -786,6 +815,7 @@ class ObjectPickPrototype(QMainWindow):
 
     def robot_manager_finished(self, exit_code: int) -> None:
         was_running = self.robot_process is not None
+        self._finish_batch("Robot manager stopped; batch workflow cancelled.", error=True)
         self.robot_process = None
         if self.robot_status_worker is not None:
             self.robot_status_worker.stop()
@@ -806,6 +836,7 @@ class ObjectPickPrototype(QMainWindow):
         self.close_gripper_button.setEnabled(False)
         self.gripper_state_label.setText("Unknown")
         self.robot_button.setEnabled(True)
+        self._update_pick_controls()
         if was_running and exit_code != 0:
             self.log(f"Robot manager stopped with exit code {exit_code}.")
 
@@ -871,6 +902,18 @@ class ObjectPickPrototype(QMainWindow):
             if message:
                 self.log_robot_message(message)
         self.last_robot_result_sequence = max(self.last_robot_result_sequence, sequence)
+
+        pick_completion_sequence = int(status.get("pick_completion_sequence", 0))
+        if pick_completion_sequence > self.last_pick_completion_sequence:
+            self.last_pick_completion_sequence = pick_completion_sequence
+            if self.batch_active and self.batch_state == "executing":
+                if bool(status.get("last_pick_success")):
+                    self._batch_cycle_completed()
+                else:
+                    self._finish_batch(
+                        "Batch stopped because the pick-and-release cycle failed.",
+                        error=True,
+                    )
         self._update_pick_controls()
 
     def send_robot_command(self, command: dict) -> None:
@@ -902,9 +945,33 @@ class ObjectPickPrototype(QMainWindow):
             self.pick_plan_ready = bool(response.get("success"))
             if not self.pick_plan_ready:
                 self.planned_pick_target = None
+            if self.batch_active and self.batch_state == "planning":
+                if response.get("success") and self.batch_current_target is not None:
+                    self.batch_state = "executing"
+                    self.send_robot_command(
+                        {
+                            "command": "execute_pick",
+                            "target": dict(self.batch_current_target),
+                            "release_after_return": True,
+                        }
+                    )
+                else:
+                    self._finish_batch(
+                        "Batch stopped because MoveIt could not plan the selected target.",
+                        error=True,
+                    )
             self._update_pick_controls()
         elif command == "execute_pick":
             self.pick_button.setEnabled(False)
+            if (
+                self.batch_active
+                and self.batch_state == "executing"
+                and not response.get("success")
+            ):
+                self._finish_batch(
+                    "Batch stopped because robot execution was not accepted.",
+                    error=True,
+                )
         elif command in {"open_gripper", "close_gripper"}:
             self.open_gripper_button.setEnabled(False)
             self.close_gripper_button.setEnabled(False)
@@ -952,10 +1019,121 @@ class ObjectPickPrototype(QMainWindow):
         axes = list(zip(*self.target_history))
         return max(max(axis) - min(axis) for axis in axes) <= 0.015
 
+    @staticmethod
+    def _positions_are_stable(history: deque, tolerance: float = 0.015) -> bool:
+        if len(history) < history.maxlen:
+            return False
+        axes = list(zip(*history))
+        return max(max(axis) - min(axis) for axis in axes) <= tolerance
+
+    def _batch_candidates(self, status: dict) -> list[dict]:
+        candidates = []
+        raw_targets = status.get("targets", [])
+        if not isinstance(raw_targets, list):
+            return candidates
+        for target in raw_targets:
+            if not isinstance(target, dict):
+                continue
+            position = target.get("position_base_m")
+            if not isinstance(position, dict):
+                continue
+            try:
+                point = {key: float(position[key]) for key in ("x", "y", "z")}
+                confidence = float(target.get("confidence", 0.0))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if any(
+                math.dist(
+                    tuple(point[key] for key in ("x", "y", "z")),
+                    tuple(processed[key] for key in ("x", "y", "z")),
+                )
+                <= 0.04
+                for processed in self.batch_processed_targets
+            ):
+                continue
+            candidates.append({"position": point, "confidence": confidence})
+        candidates.sort(key=lambda item: item["confidence"], reverse=True)
+        return candidates
+
+    def _update_batch_detection(self, status: dict) -> None:
+        if (
+            not self.batch_active
+            or self.batch_state != "waiting_target"
+            or self.robot_active
+            or time.monotonic() < self.batch_next_detection_time
+        ):
+            return
+        if not bool(status.get("tf_ready")):
+            return
+
+        candidates = self._batch_candidates(status)
+        now = time.monotonic()
+        if not candidates:
+            self.batch_target_history.clear()
+            if self.batch_completed > 0 and now - self.batch_wait_started >= 5.0:
+                self._finish_batch(
+                    f"Batch completed after {self.batch_completed} object(s); "
+                    "no remaining stable target was detected."
+                )
+            elif self.batch_completed == 0 and now - self.batch_wait_started >= 10.0:
+                self._finish_batch(
+                    "No stable target was detected within 10 seconds.", error=True
+                )
+            return
+
+        if self.batch_target_history:
+            anchor = self.batch_target_history[-1]
+            selected = min(
+                candidates,
+                key=lambda item: math.dist(
+                    anchor,
+                    tuple(item["position"][key] for key in ("x", "y", "z")),
+                ),
+            )
+            selected_point = tuple(
+                selected["position"][key] for key in ("x", "y", "z")
+            )
+            if math.dist(anchor, selected_point) > 0.05:
+                self.batch_target_history.clear()
+                selected = candidates[0]
+        else:
+            selected = candidates[0]
+
+        point = tuple(selected["position"][key] for key in ("x", "y", "z"))
+        self.batch_target_history.append(point)
+        if not self._positions_are_stable(self.batch_target_history):
+            return
+
+        axes = list(zip(*self.batch_target_history))
+        self.batch_current_target = {
+            key: sum(axis) / len(axis)
+            for key, axis in zip(("x", "y", "z"), axes)
+        }
+        self.planned_pick_target = dict(self.batch_current_target)
+        self.batch_state = "planning"
+        self.batch_target_history.clear()
+        self.log(
+            f"Batch target {self.batch_completed + 1}: selected stable apple at "
+            f"X={self.batch_current_target['x']:.3f}, "
+            f"Y={self.batch_current_target['y']:.3f}, "
+            f"Z={self.batch_current_target['z']:.3f} m "
+            f"(confidence {selected['confidence']:.2f})."
+        )
+        self.send_robot_command(
+            {
+                "command": "plan_pick",
+                "target": dict(self.batch_current_target),
+                "target_label": "apple",
+                "profile": "apple",
+            }
+        )
+
     def _update_pick_controls(self) -> None:
         if not hasattr(self, "plan_pick_button"):
             return
         detection = self.latest_detection_status or {}
+        single_mode = self.pick_mode_combo.currentData() == "single"
+        batch_mode = self.pick_mode_combo.currentData() == "batch"
         correct_target = str(detection.get("target", "")).strip().lower() == "apple"
         profile_ready = self.grasp_profile_combo.currentData() == "apple"
         target_ready = (
@@ -967,7 +1145,11 @@ class ObjectPickPrototype(QMainWindow):
             and profile_ready
         )
         self.plan_pick_button.setEnabled(
-            self.robot_ready and not self.robot_active and target_ready
+            single_mode
+            and not self.batch_active
+            and self.robot_ready
+            and not self.robot_active
+            and target_ready
         )
         planned_target_valid = False
         current_position = detection.get("position_base_m")
@@ -977,19 +1159,133 @@ class ObjectPickPrototype(QMainWindow):
                 for key in ("x", "y", "z")
             ) <= 0.015
         self.pick_button.setEnabled(
-            self.robot_ready
+            single_mode
+            and not self.batch_active
+            and self.robot_ready
             and not self.robot_active
             and self.pick_plan_ready
             and target_ready
             and planned_target_valid
         )
+        batch_targets = detection.get("targets", [])
+        if not isinstance(batch_targets, list):
+            batch_targets = []
+        batch_target_available = any(
+            isinstance(target, dict)
+            and isinstance(target.get("position_base_m"), dict)
+            for target in batch_targets
+        )
+        self.batch_pick_button.setEnabled(
+            batch_mode
+            and not self.batch_active
+            and self.robot_ready
+            and not self.robot_active
+            and self.detector_process is not None
+            and bool(detection.get("tf_ready"))
+            and correct_target
+            and profile_ready
+            and batch_target_available
+        )
+        self.pick_mode_combo.setEnabled(not self.batch_active)
+        self.batch_max_spin.setEnabled(not self.batch_active)
         manual_gripper_ready = (
             self.robot_process is not None
             and self.gripper_ready
             and not self.robot_active
+            and not self.batch_active
         )
         self.open_gripper_button.setEnabled(manual_gripper_ready)
         self.close_gripper_button.setEnabled(manual_gripper_ready)
+
+    def pick_mode_changed(self, _index: int) -> None:
+        self.pick_plan_ready = False
+        self.planned_pick_target = None
+        self.execute_pose_button.setEnabled(False)
+        self._update_pick_controls()
+
+    def start_batch_pick(self) -> None:
+        if self.batch_active:
+            return
+        if self.pick_mode_combo.currentData() != "batch":
+            self.log("Select Batch Pick and Release mode first.")
+            return
+        if self.target_combo.currentText().strip().lower() != "apple":
+            self.log("Batch mode currently supports target object 'apple' only.")
+            return
+        if not self.robot_ready or self.robot_active:
+            self.log("Wait until MoveIt and Gripper are ready before starting batch mode.")
+            return
+
+        maximum = self.batch_max_spin.value()
+        answer = QMessageBox.question(
+            self,
+            "Start Automatic Batch Pick",
+            f"Automatically pick and release up to {maximum} apple(s)?\n\n"
+            "Each cycle selects the highest-confidence stable target, picks it, retreats, "
+            "returns to the arm position used for planning, and opens the gripper there. "
+            "After release, old detection data is discarded and the scene is detected again.\n\n"
+            "Confirm that a safe container is below the return position and released objects "
+            "will not remain in the pick area.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            self.log("Batch pick cancelled by the user.")
+            return
+
+        self.batch_active = True
+        self.batch_state = "waiting_target"
+        self.batch_completed = 0
+        self.batch_current_target = None
+        self.batch_processed_targets.clear()
+        self.batch_target_history.clear()
+        self.batch_next_detection_time = time.monotonic()
+        self.batch_wait_started = time.monotonic()
+        self.pick_plan_ready = False
+        self.planned_pick_target = None
+        self.log(
+            f"Batch started: maximum {maximum} apple(s). Waiting for 10 fresh stable detections."
+        )
+        self._update_pick_controls()
+
+    def _batch_cycle_completed(self) -> None:
+        if not self.batch_active or self.batch_current_target is None:
+            return
+        self.batch_processed_targets.append(dict(self.batch_current_target))
+        self.batch_completed += 1
+        maximum = self.batch_max_spin.value()
+        self.log(
+            f"Batch cycle {self.batch_completed}/{maximum} completed; object released at "
+            "the return position. Discarding the old detection snapshot."
+        )
+        if self.batch_completed >= maximum:
+            self._finish_batch(
+                f"Batch completed the requested {self.batch_completed} pick(s)."
+            )
+            return
+
+        self.batch_state = "waiting_target"
+        self.batch_current_target = None
+        self.batch_target_history.clear()
+        self.pick_plan_ready = False
+        self.planned_pick_target = None
+        self.batch_next_detection_time = time.monotonic() + 1.5
+        self.batch_wait_started = self.batch_next_detection_time
+        self.log("Waiting for a fresh scene and selecting the next stable target.")
+
+    def _finish_batch(self, message: str, error: bool = False) -> None:
+        if not self.batch_active:
+            return
+        self.batch_active = False
+        self.batch_state = "idle"
+        self.batch_current_target = None
+        self.batch_target_history.clear()
+        self.batch_next_detection_time = 0.0
+        self.batch_wait_started = 0.0
+        self.pick_plan_ready = False
+        self.planned_pick_target = None
+        self.log(("Batch error: " if error else "Batch: ") + message)
+        self._update_pick_controls()
 
     def plan_straight_pick(self) -> None:
         status = self.latest_detection_status or {}
@@ -1068,11 +1364,13 @@ class ObjectPickPrototype(QMainWindow):
             self.send_robot_command({"command": "close_gripper"})
 
     def stop_workflow(self) -> None:
+        self._finish_batch("Cancelled by the operator.")
         if self.robot_process is not None:
             self.send_robot_command({"command": "cancel"})
         self.stop_vision()
 
     def stop_vision(self) -> None:
+        self._finish_batch("Vision stopped; batch workflow cancelled.", error=True)
         if self.detector_process is not None:
             detector_process = self.detector_process
             self.detector_process = None
@@ -1105,6 +1403,7 @@ class ObjectPickPrototype(QMainWindow):
         self.coordinate_label.setText("X --  /  Y --  /  Z --")
         self.coordinate_frame_label.setText("--")
         self.start_button_state(False)
+        self._update_pick_controls()
         self.log("Vision workflow stopped.")
 
     @staticmethod

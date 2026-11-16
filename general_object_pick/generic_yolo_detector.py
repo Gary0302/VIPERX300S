@@ -192,22 +192,45 @@ class GenericYoloDetector(Node):
             result = results[0]
             count = len(result.boxes) if result.boxes is not None else 0
             max_confidence = 0.0
+            targets = []
             target_pixel = None
             position_camera_m = None
             position_base_m = None
             base_transform = self.lookup_base_transform()
             if count:
-                max_confidence = float(result.boxes.conf.max().cpu().item())
-                best_index = int(result.boxes.conf.argmax().cpu().item())
-                x1, y1, x2, y2 = result.boxes.xyxy[best_index].cpu().tolist()
-                u = int(round((x1 + x2) / 2.0))
-                v = int(round((y1 + y2) / 2.0))
-                target_pixel = {"u": u, "v": v}
-                position_camera_m = self.position_from_pixel(u, v)
-                if position_camera_m is not None and base_transform is not None:
-                    position_base_m = self.transform_position(
-                        position_camera_m, base_transform
+                for box_index in range(count):
+                    confidence = float(result.boxes.conf[box_index].cpu().item())
+                    x1, y1, x2, y2 = result.boxes.xyxy[box_index].cpu().tolist()
+                    u = int(round((x1 + x2) / 2.0))
+                    v = int(round((y1 + y2) / 2.0))
+                    camera_position = self.position_from_pixel(u, v)
+                    base_position = None
+                    if camera_position is not None and base_transform is not None:
+                        base_position = self.transform_position(
+                            camera_position, base_transform
+                        )
+                    targets.append(
+                        {
+                            "frame_index": box_index,
+                            "confidence": confidence,
+                            "bbox": {
+                                "x1": float(x1),
+                                "y1": float(y1),
+                                "x2": float(x2),
+                                "y2": float(y2),
+                            },
+                            "target_pixel": {"u": u, "v": v},
+                            "position_camera_m": camera_position,
+                            "position_base_m": base_position,
+                        }
                     )
+
+                targets.sort(key=lambda item: item["confidence"], reverse=True)
+                best = targets[0]
+                max_confidence = float(best["confidence"])
+                target_pixel = best["target_pixel"]
+                position_camera_m = best["position_camera_m"]
+                position_base_m = best["position_base_m"]
 
             annotated = result.plot()
             now = time.monotonic()
@@ -228,21 +251,34 @@ class GenericYoloDetector(Node):
                 2,
                 cv2.LINE_AA,
             )
-            if target_pixel is not None:
-                center = (target_pixel["u"], target_pixel["v"])
+            for rank, target in enumerate(targets, start=1):
+                pixel = target["target_pixel"]
+                center = (pixel["u"], pixel["v"])
+                marker_color = (0, 255, 255) if rank == 1 else (255, 180, 40)
                 cv2.drawMarker(
                     annotated,
                     center,
-                    (0, 255, 255),
+                    marker_color,
                     cv2.MARKER_CROSS,
                     18,
                     2,
                 )
-                if position_camera_m is not None:
+                cv2.putText(
+                    annotated,
+                    f"#{rank} {target['confidence']:.2f}",
+                    (max(8, center[0] - 35), max(18, center[1] - 34)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    marker_color,
+                    2,
+                    cv2.LINE_AA,
+                )
+                camera_position = target["position_camera_m"]
+                if camera_position is not None:
                     position_text = (
-                        f"X {position_camera_m['x']:.3f}  "
-                        f"Y {position_camera_m['y']:.3f}  "
-                        f"Z {position_camera_m['z']:.3f} m"
+                        f"X {camera_position['x']:.3f}  "
+                        f"Y {camera_position['y']:.3f}  "
+                        f"Z {camera_position['z']:.3f} m"
                     )
                     cv2.putText(
                         annotated,
@@ -250,7 +286,7 @@ class GenericYoloDetector(Node):
                         (max(8, center[0] - 150), max(58, center[1] - 16)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.55,
-                        (0, 255, 255),
+                        marker_color,
                         2,
                         cv2.LINE_AA,
                     )
@@ -263,6 +299,7 @@ class GenericYoloDetector(Node):
                 "target": self.class_name,
                 "count": count,
                 "max_confidence": max_confidence,
+                "targets": targets,
                 "fps": fps,
                 "depth_ready": self.depth_image is not None
                 and self.camera_intrinsics is not None,
