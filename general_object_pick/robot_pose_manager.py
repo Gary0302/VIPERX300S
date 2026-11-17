@@ -60,6 +60,10 @@ PICK_JOINT_DELTA_LIMIT_DEG = {
 }
 IK_MAX_SEED_ATTEMPTS = 6
 IK_SEED_PERTURBATION_DEG = 8.0
+# These axial joints caused the observed equivalent IK branch to flip by about
+# 180 degrees.  Constrain them during IK search instead of only rejecting the
+# result after the solver has already selected that branch.
+IK_CONTINUITY_JOINTS = ("waist", "forearm_roll", "wrist_rotate")
 COMMAND_ENDPOINT = "tcp://127.0.0.1:5561"
 STATUS_ENDPOINT = "tcp://127.0.0.1:5562"
 POSE_FILE = Path(__file__).resolve().parent / "config" / "observation_poses.json"
@@ -613,7 +617,7 @@ class RobotPoseManager(Node):
         failures = []
         for attempt, (seed_name, seed) in enumerate(candidates, start=1):
             try:
-                solution = self._request_ik(pose, seed, label)
+                solution = self._request_ik(pose, seed, reference, label)
                 self._validate_pick_joint_delta(
                     reference, solution, f"IK for {label}"
                 )
@@ -641,13 +645,18 @@ class RobotPoseManager(Node):
         )
 
     def _request_ik(
-        self, pose: PoseStamped, seed: list[float], label: str
+        self,
+        pose: PoseStamped,
+        seed: list[float],
+        reference: list[float],
+        label: str,
     ) -> list[float]:
         request = GetPositionIK.Request()
         request.ik_request.group_name = "interbotix_arm"
         request.ik_request.ik_link_name = END_EFFECTOR_LINK
         request.ik_request.pose_stamped = pose
         request.ik_request.robot_state = self._robot_state(seed)
+        request.ik_request.constraints = self._ik_continuity_constraints(reference)
         request.ik_request.timeout = DurationMsg(sec=2, nanosec=0)
         response = self._await(self._compute_ik.call_async(request), 4.0)
         if response is None:
@@ -658,6 +667,25 @@ class RobotPoseManager(Node):
         if not all(name in by_name for name in JOINT_ORDER):
             raise RuntimeError(f"IK response for {label} omitted an arm joint.")
         return [float(by_name[name]) for name in JOINT_ORDER]
+
+    @staticmethod
+    def _ik_continuity_constraints(reference: list[float]) -> Constraints:
+        if len(reference) != len(JOINT_ORDER):
+            raise RuntimeError(
+                f"Cannot constrain IK: expected {len(JOINT_ORDER)} arm joints."
+            )
+        constraints = Constraints()
+        reference_by_name = dict(zip(JOINT_ORDER, reference))
+        for joint_name in IK_CONTINUITY_JOINTS:
+            limit_rad = math.radians(PICK_JOINT_DELTA_LIMIT_DEG[joint_name])
+            constraint = JointConstraint()
+            constraint.joint_name = joint_name
+            constraint.position = float(reference_by_name[joint_name])
+            constraint.tolerance_above = limit_rad
+            constraint.tolerance_below = limit_rad
+            constraint.weight = 1.0
+            constraints.joint_constraints.append(constraint)
+        return constraints
 
     @staticmethod
     def _ik_seed_candidates(
