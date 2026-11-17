@@ -49,6 +49,9 @@ ANNOTATED_TOPIC = "/object_detector/annotated_image"
 STATUS_TOPIC = "/object_detector/status"
 ROBOT_COMMAND_ENDPOINT = "tcp://127.0.0.1:5561"
 ROBOT_STATUS_ENDPOINT = "tcp://127.0.0.1:5562"
+BATCH_STABLE_DETECTION_COUNT = 6
+BATCH_INITIAL_TARGET_TIMEOUT_SECONDS = 10.0
+BATCH_REMAINING_TARGET_TIMEOUT_SECONDS = 10.0
 
 
 class VisionStreamWorker(QThread):
@@ -238,7 +241,7 @@ class ObjectPickPrototype(QMainWindow):
         self.batch_active = False
         self.batch_state = "idle"
         self.batch_completed = 0
-        self.batch_target_history = deque(maxlen=10)
+        self.batch_target_history = deque(maxlen=BATCH_STABLE_DETECTION_COUNT)
         self.batch_current_target: dict | None = None
         self.batch_processed_targets: list[dict[str, float]] = []
         self.batch_next_detection_time = 0.0
@@ -1068,17 +1071,28 @@ class ObjectPickPrototype(QMainWindow):
 
         candidates = self._batch_candidates(status)
         now = time.monotonic()
+        if (
+            self.batch_completed > 0
+            and now - self.batch_wait_started
+            >= BATCH_REMAINING_TARGET_TIMEOUT_SECONDS
+        ):
+            self._finish_batch(
+                f"Batch completed after {self.batch_completed} object(s); "
+                "no remaining stable target was detected."
+            )
+            return
+        if (
+            self.batch_completed == 0
+            and now - self.batch_wait_started >= BATCH_INITIAL_TARGET_TIMEOUT_SECONDS
+        ):
+            self._finish_batch(
+                "No stable target was detected within "
+                f"{BATCH_INITIAL_TARGET_TIMEOUT_SECONDS:.0f} seconds.",
+                error=True,
+            )
+            return
         if not candidates:
             self.batch_target_history.clear()
-            if self.batch_completed > 0 and now - self.batch_wait_started >= 5.0:
-                self._finish_batch(
-                    f"Batch completed after {self.batch_completed} object(s); "
-                    "no remaining stable target was detected."
-                )
-            elif self.batch_completed == 0 and now - self.batch_wait_started >= 10.0:
-                self._finish_batch(
-                    "No stable target was detected within 10 seconds.", error=True
-                )
             return
 
         if self.batch_target_history:
@@ -1244,7 +1258,8 @@ class ObjectPickPrototype(QMainWindow):
         self.pick_plan_ready = False
         self.planned_pick_target = None
         self.log(
-            f"Batch started: maximum {maximum} apple(s). Waiting for 10 fresh stable detections."
+            f"Batch started: maximum {maximum} apple(s). Waiting for "
+            f"{BATCH_STABLE_DETECTION_COUNT} fresh stable detections."
         )
         self._update_pick_controls()
 
