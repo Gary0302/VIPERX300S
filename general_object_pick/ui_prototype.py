@@ -55,6 +55,7 @@ ROBOT_STATUS_ENDPOINT = "tcp://127.0.0.1:5562"
 BATCH_STABLE_DETECTION_COUNT = 6
 BATCH_INITIAL_TARGET_TIMEOUT_SECONDS = 10.0
 BATCH_REMAINING_TARGET_TIMEOUT_SECONDS = 10.0
+APPLE_TARGETS = ("apple", "red_apple", "green_apple")
 
 
 class VisionStreamWorker(QThread):
@@ -248,6 +249,7 @@ class ObjectPickPrototype(QMainWindow):
         self.batch_active = False
         self.batch_state = "idle"
         self.batch_completed = 0
+        self.batch_target_label = "apple"
         self.batch_target_history = deque(maxlen=BATCH_STABLE_DETECTION_COUNT)
         self.batch_current_target: dict | None = None
         self.batch_processed_targets: list[dict[str, float]] = []
@@ -357,7 +359,9 @@ class ObjectPickPrototype(QMainWindow):
         grid.addWidget(QLabel("Target object"), 2, 0)
         self.target_combo = QComboBox()
         self.target_combo.setEditable(True)
-        self.target_combo.addItems(["apple", "bottle", "tweezers"])
+        self.target_combo.addItems(
+            ["apple", "red_apple", "green_apple", "bottle", "tweezers"]
+        )
         self.target_combo.setCurrentText("apple")
         grid.addWidget(self.target_combo, 2, 1, 1, 2)
 
@@ -1109,6 +1113,13 @@ class ObjectPickPrototype(QMainWindow):
                 confidence = float(target.get("confidence", 0.0))
             except (KeyError, TypeError, ValueError):
                 continue
+            class_name = str(target.get("class_name", "")).strip().lower()
+            if (
+                self.batch_target_label != "apple"
+                and class_name
+                and class_name != self.batch_target_label
+            ):
+                continue
             if any(
                 math.dist(
                     tuple(point[key] for key in ("x", "y", "z")),
@@ -1118,7 +1129,13 @@ class ObjectPickPrototype(QMainWindow):
                 for processed in self.batch_processed_targets
             ):
                 continue
-            candidates.append({"position": point, "confidence": confidence})
+            candidates.append(
+                {
+                    "position": point,
+                    "confidence": confidence,
+                    "class_name": class_name or self.batch_target_label,
+                }
+            )
         candidates.sort(key=lambda item: item["confidence"], reverse=True)
         return candidates
 
@@ -1131,6 +1148,8 @@ class ObjectPickPrototype(QMainWindow):
         ):
             return
         if not bool(status.get("tf_ready")):
+            return
+        if str(status.get("target", "")).strip().lower() != self.batch_target_label:
             return
 
         candidates = self._batch_candidates(status)
@@ -1191,7 +1210,8 @@ class ObjectPickPrototype(QMainWindow):
         self.batch_state = "planning"
         self.batch_target_history.clear()
         self.log(
-            f"Batch target {self.batch_completed + 1}: selected stable apple at "
+            f"Batch target {self.batch_completed + 1}: selected stable "
+            f"{selected['class_name']} at "
             f"X={self.batch_current_target['x']:.3f}, "
             f"Y={self.batch_current_target['y']:.3f}, "
             f"Z={self.batch_current_target['z']:.3f} m "
@@ -1201,7 +1221,7 @@ class ObjectPickPrototype(QMainWindow):
             {
                 "command": "plan_pick",
                 "target": dict(self.batch_current_target),
-                "target_label": "apple",
+                "target_label": self.batch_target_label,
                 "profile": "apple",
             }
         )
@@ -1212,7 +1232,11 @@ class ObjectPickPrototype(QMainWindow):
         detection = self.latest_detection_status or {}
         single_mode = self.pick_mode_combo.currentData() == "single"
         batch_mode = self.pick_mode_combo.currentData() == "batch"
-        correct_target = str(detection.get("target", "")).strip().lower() == "apple"
+        selected_target = self.target_combo.currentText().strip().lower()
+        correct_target = (
+            selected_target in APPLE_TARGETS
+            and str(detection.get("target", "")).strip().lower() == selected_target
+        )
         profile_ready = self.grasp_profile_combo.currentData() == "apple"
         target_ready = (
             int(detection.get("count", 0)) == 1
@@ -1287,18 +1311,23 @@ class ObjectPickPrototype(QMainWindow):
         if self.pick_mode_combo.currentData() != "batch":
             self.log("Select Batch Pick and Release mode first.")
             return
-        if self.target_combo.currentText().strip().lower() != "apple":
-            self.log("Batch mode currently supports target object 'apple' only.")
+        selected_target = self.target_combo.currentText().strip().lower()
+        if selected_target not in APPLE_TARGETS:
+            self.log(
+                "Batch mode supports apple, red_apple, or green_apple targets only."
+            )
             return
         if not self.robot_ready or self.robot_active:
             self.log("Wait until MoveIt and Gripper are ready before starting batch mode.")
             return
 
         maximum = self.batch_max_spin.value()
+        display_target = selected_target.replace("_", " ")
         answer = QMessageBox.question(
             self,
             "Start Automatic Batch Pick",
-            f"Automatically pick and release up to {maximum} apple(s)?\n\n"
+            f"Automatically pick and release up to {maximum} "
+            f"{display_target}(s)?\n\n"
             "Each cycle selects the highest-confidence stable target, picks it, retreats, "
             "returns to the arm position used for planning, and opens the gripper there. "
             "After release, old detection data is discarded and the scene is detected again.\n\n"
@@ -1314,6 +1343,7 @@ class ObjectPickPrototype(QMainWindow):
         self.batch_active = True
         self.batch_state = "waiting_target"
         self.batch_completed = 0
+        self.batch_target_label = selected_target
         self.batch_current_target = None
         self.batch_processed_targets.clear()
         self.batch_target_history.clear()
@@ -1322,7 +1352,8 @@ class ObjectPickPrototype(QMainWindow):
         self.pick_plan_ready = False
         self.planned_pick_target = None
         self.log(
-            f"Batch started: maximum {maximum} apple(s). Waiting for "
+            f"Batch started: target={self.batch_target_label}, maximum {maximum}. "
+            "Waiting for "
             f"{BATCH_STABLE_DETECTION_COUNT} fresh stable detections."
         )
         self._update_pick_controls()
@@ -1378,7 +1409,8 @@ class ObjectPickPrototype(QMainWindow):
         }
         self.pick_button.setEnabled(False)
         self.log(
-            "Planning apple pick: pregrasp, 3 cm approach, close, retreat, and return."
+            f"Planning {self.target_combo.currentText().strip().lower()} pick: pregrasp, "
+            "3 cm approach, close, retreat, and return."
         )
         self.send_robot_command(
             {

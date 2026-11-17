@@ -253,4 +253,4 @@ cp /workspace/models/training_runs/printed_apple_yolo11s/weights/last.pt \
   /workspace/models/printed_apple_yolo11s.pt
 ```
 
-重新啟動 UI 後選擇 `printed_apple_yolo11s.pt`，Target 維持 `apple`。辨識節點會合併 `red_apple` 與 `green_apple` 供既有夾取流程使用，畫面上的框仍顯示實際顏色類別。
+重新啟動 UI 後選擇 `printed_apple_yolo11s.pt`。Target 選 `apple` 時會合併紅綠兩類；選 `red_apple` 或 `green_apple` 時，只會將指定顏色送入單顆或批次夾取流程。畫面上的框仍顯示實際顏色類別。

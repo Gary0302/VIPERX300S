@@ -132,7 +132,7 @@ UI 會自行管理相機與辨識器，不需要另外啟動 RealSense 或 `appl
 
 1. `Backend` 選擇 `YOLO (Phase 1)`。
 2. `Model` 選擇需要的模型；3D 列印紅綠蘋果使用 `printed_apple_yolo11s.pt`，一般 COCO 類別使用 `yolo11s.pt`。
-3. `Target object` 預設為 `apple`，也可從下拉選單選擇 `bottle`、`tweezers`，或輸入模型支援的其他類別。
+3. `Target object` 預設為 `apple`；搭配列印蘋果模型時，可選 `red_apple` 或 `green_apple` 只辨識及夾取指定顏色。也能選擇 `bottle`、`tweezers`，或輸入模型支援的其他類別，但尚未校正的物品只能辨識，不能執行實體夾取。
 4. 按 `Start Vision`。
 5. 等待 Camera 與 Detector 顯示 `Ready`。
 6. 若手眼 TF 完整，TF 會顯示 `Ready`，座標系應為 `vx300s/base_link`。
@@ -140,7 +140,7 @@ UI 會自行管理相機與辨識器，不需要另外啟動 RealSense 或 `appl
 
 一般 COCO 模型不一定包含 `tweezers`。輸入的類別名稱必須存在於所選模型內。
 
-`printed_apple_yolo11s.pt` 內部有 `red_apple` 與 `green_apple` 兩類；當 UI 的目標維持 `apple` 時，辨識節點會合併兩類供既有單顆與批次夾取流程使用，畫面上的框仍會顯示實際顏色類別。
+`printed_apple_yolo11s.pt` 內部有 `red_apple` 與 `green_apple` 兩類。選 `apple` 時辨識節點會合併兩類；選 `red_apple` 或 `green_apple` 時只輸出指定顏色。三種選項都可使用單顆與批次夾取，且畫面上的框會顯示實際顏色類別。切換目標前先停止 Vision，選好後再重新按 `Start Vision`。
 
 UI 對一般 COCO 模型使用 `0.25` 信心門檻；對 `printed_apple_yolo11s.pt` 自動使用實測較安全的 `0.55`。保留 test 集在此門檻下的 precision 為 `1.00`、recall 約為 `0.974`，而目前 34 張空場景測試皆未產生假框。若日後重新訓練模型，必須重新做空場景測試，不能只看 mAP。
 
@@ -220,7 +220,7 @@ UI 對一般 COCO 模型使用 `0.25` 信心門檻；對 `printed_apple_yolo11s.
 批次模式不會取代上面的單顆模式。`Single Pick (Keep Holding)` 保留原本抓取後保持夾爪閉合的流程；`Batch Pick and Release` 才會在每輪返回後自動張開夾爪。
 
 1. 先使用 `Observation Pose` 將手臂移到相機適合觀察、且夾爪下方有安全容器的位置。批次流程會把每輪開始規劃時的關節位置當作返回與釋放位置。
-2. `Target object` 選擇 `apple`，`Grasp profile` 選擇 `apple (Existing reference)`。
+2. `Target object` 選擇需要的模式：`apple` 會夾紅色或綠色；`red_apple` 只夾紅色；`green_apple` 只夾綠色。`Grasp profile` 維持 `apple (Existing reference)`。
 3. `Pick mode` 選擇 `Batch Pick and Release`。
 4. 第一次實機測試把 `Maximum batch picks` 設為 `1`；確認後再設定為 `2` 或 `3`。
 5. 等待 Camera、Detector、TF、MoveIt 與 Gripper 都顯示 `Ready`，再按 `Confirm and Start Batch`。
@@ -228,7 +228,7 @@ UI 對一般 COCO 模型使用 `0.25` 信心門檻；對 `printed_apple_yolo11s.
 
 每一輪會：
 
-- 取得畫面內所有有效蘋果座標。
+- 取得畫面內符合 `Target object` 顏色條件的所有有效蘋果座標。
 - 先鎖定信心最高的候選，再以最近位置連續追蹤 6 筆；三軸變動需小於 1.5 公分。
 - 規劃並執行張爪、pregrasp、前進 3 公分、關爪、retreat 及返回起點。
 - 返回起點後停留 2 秒，再自動張開夾爪。釋放後維持張開，讓下一輪可以直接進入夾取準備；若批次只設定一顆，任務結束後也會保持張開。

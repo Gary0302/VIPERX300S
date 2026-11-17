@@ -64,6 +64,7 @@ IK_SEED_PERTURBATION_DEG = 8.0
 # 180 degrees.  Constrain them during IK search instead of only rejecting the
 # result after the solver has already selected that branch.
 IK_CONTINUITY_JOINTS = ("waist", "forearm_roll", "wrist_rotate")
+APPLE_TARGETS = ("apple", "red_apple", "green_apple")
 COMMAND_ENDPOINT = "tcp://127.0.0.1:5561"
 STATUS_ENDPOINT = "tcp://127.0.0.1:5562"
 POSE_FILE = Path(__file__).resolve().parent / "config" / "observation_poses.json"
@@ -343,10 +344,13 @@ class RobotPoseManager(Node):
                 "success": False,
                 "message": "Only the tested apple grasp profile is enabled in this version.",
             }
-        if target_label.strip().lower() != "apple":
+        normalized_target = target_label.strip().lower()
+        if normalized_target not in APPLE_TARGETS:
             return {
                 "success": False,
-                "message": "Select target object 'apple' for the apple grasp profile.",
+                "message": (
+                    "Select apple, red_apple, or green_apple for the apple grasp profile."
+                ),
             }
         try:
             x, y, z = (float(target[key]) for key in ("x", "y", "z"))
@@ -413,7 +417,7 @@ class RobotPoseManager(Node):
             self._pick_start_joints = start_joints
             self._pick_pregrasp_joints = list(pre_joints)
             self._pick_grasp_joints = list(grasp_joints)
-            self._pick_target = {"x": x, "y": y, "z": z, "label": target_label}
+            self._pick_target = {"x": x, "y": y, "z": z, "label": normalized_target}
             display = DisplayTrajectory()
             display.trajectory_start = pre_result.trajectory_start
             display.trajectory = list(self._pick_trajectories)
