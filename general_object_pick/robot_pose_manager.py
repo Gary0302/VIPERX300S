@@ -58,6 +58,8 @@ PICK_JOINT_DELTA_LIMIT_DEG = {
     "wrist_angle": 160.0,
     "wrist_rotate": 35.0,
 }
+IK_MAX_SEED_ATTEMPTS = 6
+IK_SEED_PERTURBATION_DEG = 8.0
 COMMAND_ENDPOINT = "tcp://127.0.0.1:5561"
 STATUS_ENDPOINT = "tcp://127.0.0.1:5562"
 POSE_FILE = Path(__file__).resolve().parent / "config" / "observation_poses.json"
@@ -76,7 +78,7 @@ APPROACH_DISTANCE_M = 0.03
 # command is applied and increases while the close command is applied.  These
 # values were confirmed from the real hardware instead of inferred from the
 # MoveIt named-state values.
-OPEN_FINGER_TARGET_M = 0.0165
+OPEN_FINGER_TARGET_M = 0.015  # 調整夾爪開的大小，數字越小開越大
 OPEN_FINGER_MAX_M = 0.025
 CLOSED_FINGER_MIN_M = 0.030
 FINGER_MOVEMENT_MIN_M = 0.002
@@ -100,6 +102,8 @@ class RobotPoseManager(Node):
         self._pick_start_joints: list[float] | None = None
         self._pick_pregrasp_joints: list[float] | None = None
         self._pick_grasp_joints: list[float] | None = None
+        self._last_safe_pregrasp_joints: list[float] | None = None
+        self._last_safe_grasp_joints: list[float] | None = None
         self._pick_target: dict | None = None
         self._pick_completion_sequence = 0
         self._last_pick_success: bool | None = None
@@ -373,11 +377,21 @@ class RobotPoseManager(Node):
         self._active_command = "plan_pick"
         self._invalidate_plan()
         try:
-            pre_joints = self._solve_ik(pre, start_joints, "pregrasp")
+            pre_joints = self._solve_ik(
+                pre,
+                start_joints,
+                "pregrasp",
+                self._last_safe_pregrasp_joints,
+            )
             pre_result = self._plan_joint_segment(start_joints, pre_joints, "pregrasp")
             pre_end = self._trajectory_endpoint(pre_result.planned_trajectory)
 
-            grasp_joints = self._solve_ik(grasp, pre_end, "grasp")
+            grasp_joints = self._solve_ik(
+                grasp,
+                pre_end,
+                "grasp",
+                self._last_safe_grasp_joints,
+            )
             approach_result = self._plan_joint_segment(pre_end, grasp_joints, "approach")
             grasp_end = self._trajectory_endpoint(approach_result.planned_trajectory)
             retreat_result = self._plan_joint_segment(grasp_end, pre_joints, "retreat")
@@ -516,6 +530,9 @@ class RobotPoseManager(Node):
                     "Straight pick returned to its original start pose, but gripper-close "
                     "position feedback was not verified. Treat the object as potentially held."
                 )
+            with self._lock:
+                self._last_safe_pregrasp_joints = list(pregrasp_joints)
+                self._last_safe_grasp_joints = list(grasp_joints)
             cycle_success = True
         except Exception as error:
             self._set_result(str(error))
@@ -585,7 +602,47 @@ class RobotPoseManager(Node):
         self._set_result(message)
         return {"success": result is not None, "message": message}
 
-    def _solve_ik(self, pose: PoseStamped, seed: list[float], label: str) -> list[float]:
+    def _solve_ik(
+        self,
+        pose: PoseStamped,
+        reference: list[float],
+        label: str,
+        previous_safe_seed: list[float] | None = None,
+    ) -> list[float]:
+        candidates = self._ik_seed_candidates(reference, previous_safe_seed)
+        failures = []
+        for attempt, (seed_name, seed) in enumerate(candidates, start=1):
+            try:
+                solution = self._request_ik(pose, seed, label)
+                self._validate_pick_joint_delta(
+                    reference, solution, f"IK for {label}"
+                )
+            except RuntimeError as error:
+                failures.append(f"{seed_name}: {error}")
+                if attempt < len(candidates):
+                    self._set_result(
+                        f"IK attempt {attempt}/{len(candidates)} for {label} using "
+                        f"{seed_name} was rejected: {error} "
+                        "Retrying with another safe seed."
+                    )
+                continue
+
+            if attempt > 1:
+                self._set_result(
+                    f"Safe IK for {label} found on attempt {attempt}/{len(candidates)} "
+                    f"using {seed_name}."
+                )
+            return solution
+
+        detail = failures[-1] if failures else "no IK response was returned"
+        raise RuntimeError(
+            f"No safe IK for {label} after {len(candidates)} seed attempts. "
+            f"Last rejection: {detail}"
+        )
+
+    def _request_ik(
+        self, pose: PoseStamped, seed: list[float], label: str
+    ) -> list[float]:
         request = GetPositionIK.Request()
         request.ik_request.group_name = "interbotix_arm"
         request.ik_request.ik_link_name = END_EFFECTOR_LINK
@@ -600,9 +657,53 @@ class RobotPoseManager(Node):
         by_name = dict(zip(response.solution.joint_state.name, response.solution.joint_state.position))
         if not all(name in by_name for name in JOINT_ORDER):
             raise RuntimeError(f"IK response for {label} omitted an arm joint.")
-        solution = [float(by_name[name]) for name in JOINT_ORDER]
-        self._validate_pick_joint_delta(seed, solution, f"IK for {label}")
-        return solution
+        return [float(by_name[name]) for name in JOINT_ORDER]
+
+    @staticmethod
+    def _ik_seed_candidates(
+        reference: list[float], previous_safe_seed: list[float] | None
+    ) -> list[tuple[str, list[float]]]:
+        if len(reference) != len(JOINT_ORDER):
+            raise RuntimeError(
+                f"Cannot generate IK seeds: expected {len(JOINT_ORDER)} arm joints."
+            )
+
+        candidates: list[tuple[str, list[float]]] = []
+
+        def add(name: str, values: list[float]) -> None:
+            if len(values) != len(JOINT_ORDER):
+                return
+            candidate = [float(value) for value in values]
+            if any(
+                max(abs(a - b) for a, b in zip(candidate, existing)) < 1e-6
+                for _, existing in candidates
+            ):
+                return
+            candidates.append((name, candidate))
+
+        add("current joint state", reference)
+        if previous_safe_seed is not None:
+            add("previous successful pick pose", previous_safe_seed)
+
+        base = (
+            [float(value) for value in previous_safe_seed]
+            if previous_safe_seed is not None
+            and len(previous_safe_seed) == len(JOINT_ORDER)
+            else [float(value) for value in reference]
+        )
+        perturbation = math.radians(IK_SEED_PERTURBATION_DEG)
+        for joint_name in ("elbow", "shoulder", "wrist_angle"):
+            joint_index = JOINT_ORDER.index(joint_name)
+            for direction in (1.0, -1.0):
+                candidate = list(base)
+                candidate[joint_index] += direction * perturbation
+                add(
+                    f"{joint_name} seed {direction * IK_SEED_PERTURBATION_DEG:+.0f} deg",
+                    candidate,
+                )
+                if len(candidates) >= IK_MAX_SEED_ATTEMPTS:
+                    return candidates
+        return candidates
 
     def _plan_joint_segment(self, start: list[float], goal_joints: list[float], label: str):
         self._validate_pick_joint_delta(start, goal_joints, f"target for {label}")
