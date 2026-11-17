@@ -19,6 +19,7 @@
 - [x] 蘋果直進 3 公分夾取、退回並返回執行前姿勢。
 - [x] 保留單顆模式，並在 UI 加入多顆蘋果逐輪重新辨識、夾取、返回與釋放模式。
 - [x] 動作期間顯示逐步紀錄，發生錯誤時中止後續步驟。
+- [x] 從 UI 將未畫辨識框的 ROS 2 原始彩色影像自動保存為訓練資料。
 
 目前只有 `apple (Existing reference)` 可以執行實體夾取。其他模型與類別可以辨識及預覽座標，但尚未校正前不會開放夾取。
 
@@ -31,6 +32,11 @@ general_object_pick/
 ├── README.md                    # 本操作說明
 ├── DESIGN.md                    # 架構、進度與後續規劃
 ├── ui_prototype.py              # PyQt5 操作介面與流程管理
+├── dataset_capture.py           # ROS 2 原始彩色影像蒐集器
+├── DATA_COLLECTION.md           # 影像蒐集、標註、切分與訓練指南
+├── auto_label_dataset.py        # YOLO11 自動預標註
+├── dataset_annotator.py         # PyQt5 人工審查介面
+├── build_training_dataset.py    # 驗證標註並建立 train/val/test
 ├── generic_yolo_detector.py     # YOLO、深度與 TF 座標節點
 ├── robot_pose_manager.py        # MoveIt、觀察姿勢與夾爪控制
 └── config/
@@ -125,7 +131,7 @@ UI 會自行管理相機與辨識器，不需要另外啟動 RealSense 或 `appl
 ### 視覺與座標
 
 1. `Backend` 選擇 `YOLO (Phase 1)`。
-2. `Model` 選擇需要的模型，例如 `yolo11s.pt`。
+2. `Model` 選擇需要的模型；3D 列印紅綠蘋果使用 `printed_apple_yolo11s.pt`，一般 COCO 類別使用 `yolo11s.pt`。
 3. `Target object` 預設為 `apple`，也可從下拉選單選擇 `bottle`、`tweezers`，或輸入模型支援的其他類別。
 4. 按 `Start Vision`。
 5. 等待 Camera 與 Detector 顯示 `Ready`。
@@ -133,6 +139,10 @@ UI 會自行管理相機與辨識器，不需要另外啟動 RealSense 或 `appl
 7. `Preview Target` 可以把目前座標記錄到 Event Log。
 
 一般 COCO 模型不一定包含 `tweezers`。輸入的類別名稱必須存在於所選模型內。
+
+`printed_apple_yolo11s.pt` 內部有 `red_apple` 與 `green_apple` 兩類；當 UI 的目標維持 `apple` 時，辨識節點會合併兩類供既有單顆與批次夾取流程使用，畫面上的框仍會顯示實際顏色類別。
+
+UI 對一般 COCO 模型使用 `0.25` 信心門檻；對 `printed_apple_yolo11s.pt` 自動使用實測較安全的 `0.55`。保留 test 集在此門檻下的 precision 為 `1.00`、recall 約為 `0.974`，而目前 34 張空場景測試皆未產生假框。若日後重新訓練模型，必須重新做空場景測試，不能只看 mAP。
 
 ### 連接手臂
 
@@ -310,5 +320,6 @@ UI 的停止與取消功能不能取代實體急停。若手臂未停止，立�
 ## 相關文件
 
 - [系統設計、進度與後續規劃](DESIGN.md)
+- [3D 列印蘋果資料蒐集、標註與訓練指南](DATA_COLLECTION.md)
 - [既有蘋果辨識與自動抓放指南](../apple_pick/APPLE_PICK_GUIDE.md)
 - [手眼校正指南](../apple_pick/CALIBRATION_GUIDE.md)

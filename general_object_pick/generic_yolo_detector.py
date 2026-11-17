@@ -54,9 +54,9 @@ class GenericYoloDetector(Node):
 
         self.get_logger().info(f"Loading model: {model_path}")
         self.model = YOLO(str(model_path))
-        self.class_id, self.class_name = self._resolve_target(self.target)
+        self.class_ids, self.class_name = self._resolve_target(self.target)
         self.get_logger().info(
-            f"Detector ready: target={self.class_name}, class_id={self.class_id}, "
+            f"Detector ready: target={self.class_name}, class_ids={self.class_ids}, "
             f"confidence={self.confidence:.2f}"
         )
 
@@ -81,13 +81,25 @@ class GenericYoloDetector(Node):
             qos_profile_sensor_data,
         )
 
-    def _resolve_target(self, target: str) -> tuple[int, str]:
+    def _resolve_target(self, target: str) -> tuple[list[int], str]:
         names = self.model.names
         items = list(names.items()) if isinstance(names, dict) else list(enumerate(names))
         normalized = target.casefold()
         for class_id, class_name in items:
             if str(class_name).casefold() == normalized:
-                return int(class_id), str(class_name)
+                return [int(class_id)], str(class_name)
+
+        # A fine-tuned printed-apple model has separate red_apple and
+        # green_apple classes.  The existing pick workflow deliberately keeps
+        # using the generic "apple" target, so combine both colour classes.
+        if normalized == "apple":
+            apple_classes = [
+                int(class_id)
+                for class_id, class_name in items
+                if str(class_name).casefold().endswith("_apple")
+            ]
+            if apple_classes:
+                return apple_classes, "apple"
 
         available = ", ".join(str(name) for _, name in items)
         raise ValueError(
@@ -184,7 +196,7 @@ class GenericYoloDetector(Node):
             frame = self.bridge.imgmsg_to_cv2(message, "bgr8")
             results = self.model.predict(
                 frame,
-                classes=[self.class_id],
+                classes=self.class_ids,
                 conf=self.confidence,
                 iou=0.45,
                 verbose=False,
@@ -200,6 +212,8 @@ class GenericYoloDetector(Node):
             if count:
                 for box_index in range(count):
                     confidence = float(result.boxes.conf[box_index].cpu().item())
+                    class_id = int(result.boxes.cls[box_index].cpu().item())
+                    detected_class = str(self.model.names[class_id])
                     x1, y1, x2, y2 = result.boxes.xyxy[box_index].cpu().tolist()
                     u = int(round((x1 + x2) / 2.0))
                     v = int(round((y1 + y2) / 2.0))
@@ -212,6 +226,8 @@ class GenericYoloDetector(Node):
                     targets.append(
                         {
                             "frame_index": box_index,
+                            "class_id": class_id,
+                            "class_name": detected_class,
                             "confidence": confidence,
                             "bbox": {
                                 "x1": float(x1),

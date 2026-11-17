@@ -42,3 +42,16 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Locally collected training images (keep documentation and code in Git)
+datasets/printed_apple/raw/
+datasets/printed_apple/organized/
+datasets/printed_apple/classification.csv
+datasets/printed_apple/labels/
+datasets/printed_apple/annotation_review.json
+datasets/printed_apple/auto_label_report.csv
+datasets/printed_apple/training_exclude.txt
+datasets/printed_apple/yolo_dataset/
+
+# Local training runs; keep only a deliberately exported best model in models/
+models/training_runs/

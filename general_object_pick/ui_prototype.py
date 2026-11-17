@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QComboBox,
+    QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -43,6 +45,7 @@ from PyQt5.QtWidgets import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = PROJECT_ROOT / "models"
+DATASET_ROOT = PROJECT_ROOT / "datasets" / "printed_apple" / "raw"
 MODEL_EXTENSIONS = {".pt", ".pth", ".onnx", ".engine"}
 COLOR_TOPIC = "/camera/camera/color/image_raw"
 ANNOTATED_TOPIC = "/object_detector/annotated_image"
@@ -218,6 +221,10 @@ class ObjectPickPrototype(QMainWindow):
         self.camera_process: QProcess | None = None
         self.detector_process: QProcess | None = None
         self.robot_process: QProcess | None = None
+        self.capture_process: QProcess | None = None
+        self.capture_output_buffer = ""
+        self.capture_session_dir: Path | None = None
+        self.capture_count = 0
         self.image_worker: VisionStreamWorker | None = None
         self.robot_status_worker: RobotStatusWorker | None = None
         self.robot_command_workers: set[RobotCommandWorker] = set()
@@ -466,8 +473,57 @@ class ObjectPickPrototype(QMainWindow):
         workflow_layout.addWidget(self.stop_button, 6, 0)
         workflow_layout.addWidget(self.emergency_button, 6, 1)
         layout.addWidget(workflow)
+
+        dataset = QGroupBox("6. Dataset Capture")
+        dataset_grid = QGridLayout(dataset)
+        dataset_grid.addWidget(QLabel("Session"), 0, 0)
+        self.capture_session_edit = QLineEdit(
+            datetime.now().strftime("printed_apple_%Y%m%d_%H%M%S")
+        )
+        dataset_grid.addWidget(self.capture_session_edit, 0, 1, 1, 2)
+        dataset_grid.addWidget(QLabel("Capture category"), 1, 0)
+        self.capture_label_combo = QComboBox()
+        self.capture_label_combo.addItems(
+            ["apple", "red_apple", "green_apple", "mixed_apples", "negative"]
+        )
+        dataset_grid.addWidget(self.capture_label_combo, 1, 1, 1, 2)
+        dataset_grid.addWidget(QLabel("Interval"), 2, 0)
+        self.capture_interval_spin = QDoubleSpinBox()
+        self.capture_interval_spin.setRange(0.1, 10.0)
+        self.capture_interval_spin.setSingleStep(0.1)
+        self.capture_interval_spin.setValue(0.5)
+        self.capture_interval_spin.setSuffix(" s")
+        dataset_grid.addWidget(self.capture_interval_spin, 2, 1)
+        dataset_grid.addWidget(QLabel("Maximum"), 2, 2)
+        self.capture_max_spin = QSpinBox()
+        self.capture_max_spin.setRange(1, 5000)
+        self.capture_max_spin.setValue(200)
+        self.capture_max_spin.setSuffix(" images")
+        dataset_grid.addWidget(self.capture_max_spin, 2, 3)
+        self.capture_status_label = QLabel("Stopped — 0 images")
+        self.capture_status_label.setObjectName("hint")
+        dataset_grid.addWidget(self.capture_status_label, 3, 0, 1, 4)
+        self.capture_snapshot_button = QPushButton("Save Snapshot")
+        self.capture_start_button = QPushButton("Start Auto Capture")
+        self.capture_stop_button = QPushButton("Stop Capture")
+        self.capture_stop_button.setEnabled(False)
+        self.capture_snapshot_button.clicked.connect(
+            lambda: self.start_dataset_capture(single=True)
+        )
+        self.capture_start_button.clicked.connect(
+            lambda: self.start_dataset_capture(single=False)
+        )
+        self.capture_stop_button.clicked.connect(self.stop_dataset_capture)
+        dataset_grid.addWidget(self.capture_snapshot_button, 4, 0)
+        dataset_grid.addWidget(self.capture_start_button, 4, 1, 1, 2)
+        dataset_grid.addWidget(self.capture_stop_button, 4, 3)
+        note = QLabel("Saves raw color images without YOLO boxes. Annotation is a later step.")
+        note.setWordWrap(True)
+        note.setObjectName("hint")
+        dataset_grid.addWidget(note, 5, 0, 1, 4)
+        layout.addWidget(dataset)
         layout.addStretch()
-        panel.setMinimumHeight(675)
+        panel.setMinimumHeight(930)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -609,6 +665,9 @@ class ObjectPickPrototype(QMainWindow):
         self.detector_process.finished.connect(self.detector_finished)
         self.detector_process.errorOccurred.connect(self.detector_process_error)
         detector_path = Path(__file__).with_name("generic_yolo_detector.py")
+        detector_confidence = (
+            0.55 if model_path.name == "printed_apple_yolo11s.pt" else 0.25
+        )
         self.detector_process.start(
             "python3",
             [
@@ -617,9 +676,14 @@ class ObjectPickPrototype(QMainWindow):
                 str(model_path),
                 "--target",
                 target,
+                "--confidence",
+                f"{detector_confidence:.2f}",
             ],
         )
-        self.log(f"Starting YOLO: model={model_path.name}, target={target}")
+        self.log(
+            f"Starting YOLO: model={model_path.name}, target={target}, "
+            f"confidence={detector_confidence:.2f}"
+        )
 
     def camera_topic_exists(self) -> bool:
         try:
@@ -1378,6 +1442,155 @@ class ObjectPickPrototype(QMainWindow):
             self.close_gripper_button.setEnabled(False)
             self.send_robot_command({"command": "close_gripper"})
 
+    def start_dataset_capture(self, single: bool = False) -> None:
+        if self.capture_process is not None:
+            self.log("Dataset capture is already running.")
+            return
+        if not self.camera_topic_exists():
+            QMessageBox.warning(
+                self,
+                "Camera Topic Unavailable",
+                f"No raw color stream was found at:\n{COLOR_TOPIC}\n\n"
+                "Press Start Vision first, then try again.",
+            )
+            return
+
+        session_name = self.capture_session_edit.text().strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", session_name):
+            QMessageBox.warning(
+                self,
+                "Invalid Session Name",
+                "Use only English letters, numbers, underscores, and hyphens.",
+            )
+            return
+
+        dataset_root = DATASET_ROOT.resolve()
+        output_dir = (dataset_root / session_name).resolve()
+        if output_dir.parent != dataset_root:
+            QMessageBox.warning(self, "Invalid Output", "Dataset output path is unsafe.")
+            return
+
+        self.capture_session_dir = output_dir
+        self.capture_count = 0
+        self.capture_output_buffer = ""
+        self.capture_process = QProcess(self)
+        self.capture_process.setProcessChannelMode(QProcess.MergedChannels)
+        self.capture_process.readyReadStandardOutput.connect(self.read_capture_output)
+        self.capture_process.finished.connect(self.capture_finished)
+        self.capture_process.errorOccurred.connect(self.capture_process_error)
+        capture_path = Path(__file__).with_name("dataset_capture.py")
+        max_images = 1 if single else self.capture_max_spin.value()
+        self.capture_process.start(
+            "python3",
+            [
+                str(capture_path),
+                "--output",
+                str(output_dir),
+                "--topic",
+                COLOR_TOPIC,
+                "--interval",
+                str(self.capture_interval_spin.value()),
+                "--max-images",
+                str(max_images),
+                "--scene-label",
+                self.capture_label_combo.currentText(),
+            ],
+        )
+        self.capture_snapshot_button.setEnabled(False)
+        self.capture_start_button.setEnabled(False)
+        self.capture_stop_button.setEnabled(True)
+        self.capture_session_edit.setEnabled(False)
+        self.capture_status_label.setText("Starting raw image capture...")
+        mode = "one snapshot" if single else f"up to {max_images} images"
+        self.log(f"Dataset capture starting: {mode}, session={session_name}.")
+
+    def read_capture_output(self) -> None:
+        if self.capture_process is None:
+            return
+        output = bytes(self.capture_process.readAllStandardOutput()).decode(
+            errors="replace"
+        )
+        self.capture_output_buffer += output
+        lines = self.capture_output_buffer.split("\n")
+        self.capture_output_buffer = lines.pop()
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                if "Traceback" in line or "ERROR" in line:
+                    self.log(f"Dataset capture: {line}")
+                continue
+            event_name = event.get("event")
+            if event_name == "ready":
+                existing = int(event.get("existing_images", 0))
+                self.capture_status_label.setText(
+                    f"Recording — {existing} existing images"
+                )
+                self.log(f"Saving raw images to {event.get('output', '--')}.")
+            elif event_name == "saved":
+                self.capture_count = int(event.get("count", 0))
+                total = int(event.get("total", self.capture_count))
+                free_gb = float(event.get("free_gb", 0.0))
+                self.capture_status_label.setText(
+                    f"Recording — {self.capture_count} new / {total} total "
+                    f"({free_gb:.1f} GB free)"
+                )
+                if self.capture_count == 1 or self.capture_count % 25 == 0:
+                    self.log(
+                        f"Dataset capture saved {self.capture_count} new image(s); "
+                        f"{total} total in this session."
+                    )
+            elif event_name == "error":
+                self.log(f"Dataset capture error: {event.get('message', 'unknown error')}")
+            elif event_name == "complete":
+                total = int(event.get("total", self.capture_count))
+                status = str(event.get("status", "completed"))
+                label = (
+                    "Completed"
+                    if status == "completed"
+                    else status.replace("_", " ").title()
+                )
+                self.capture_status_label.setText(
+                    f"{label} — {self.capture_count} new / {total} total"
+                )
+
+    def capture_finished(self, exit_code: int, _exit_status=None) -> None:
+        self.read_capture_output()
+        process_existed = self.capture_process is not None
+        process = self.capture_process
+        self.capture_process = None
+        self.capture_snapshot_button.setEnabled(True)
+        self.capture_start_button.setEnabled(True)
+        self.capture_stop_button.setEnabled(False)
+        self.capture_session_edit.setEnabled(True)
+        if process_existed:
+            if exit_code == 0:
+                self.log(
+                    f"Dataset capture stopped after {self.capture_count} new image(s)."
+                )
+            else:
+                self.capture_status_label.setText(f"Capture failed (exit {exit_code})")
+                self.log(f"Dataset capture stopped with exit code {exit_code}.")
+        if process is not None:
+            process.deleteLater()
+
+    def capture_process_error(self, _error) -> None:
+        if self.capture_process is not None:
+            self.capture_status_label.setText("Capture process error")
+            self.log(f"Dataset capture: {self.capture_process.errorString()}")
+            if self.capture_process.state() == QProcess.NotRunning:
+                self.capture_finished(-1)
+
+    def stop_dataset_capture(self) -> None:
+        if self.capture_process is None:
+            return
+        process = self.capture_process
+        self.capture_status_label.setText("Stopping capture...")
+        self.stop_qprocess(process)
+
     def stop_workflow(self) -> None:
         self._finish_batch("Cancelled by the operator.")
         if self.robot_process is not None:
@@ -1386,6 +1599,7 @@ class ObjectPickPrototype(QMainWindow):
 
     def stop_vision(self) -> None:
         self._finish_batch("Vision stopped; batch workflow cancelled.", error=True)
+        self.stop_dataset_capture()
         if self.detector_process is not None:
             detector_process = self.detector_process
             self.detector_process = None
