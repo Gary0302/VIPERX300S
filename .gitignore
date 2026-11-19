@@ -9,6 +9,10 @@ log/
 # Runtime cache
 .ultralytics/
 
+# SAM 3 weights and Hugging Face login token (never commit these)
+.hf_cache/
+models/sam3/
+
 # Local historical backups (not part of the runnable release)
 archive/
 

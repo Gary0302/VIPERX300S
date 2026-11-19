@@ -18,7 +18,7 @@ import rclpy
 import zmq
 from cv_bridge import CvBridge
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
@@ -32,11 +32,15 @@ ANNOTATED_TOPIC = "/object_detector/annotated_image"
 STATUS_TOPIC = "/object_detector/status"
 UI_STREAM_ENDPOINT = "tcp://127.0.0.1:5560"
 BASE_FRAME = "vx300s/base_link"
+# Keep only the newest color frame so a slow model never works on old images.
+LATEST_FRAME_QOS = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
 
 
 class GenericYoloDetector(Node):
-    def __init__(self, model_path: Path, target: str, confidence: float) -> None:
-        super().__init__("general_object_yolo_detector")
+    NODE_NAME = "general_object_yolo_detector"
+
+    def __init__(self, model_path: Path | str, target: str, confidence: float) -> None:
+        super().__init__(self.NODE_NAME)
         self.bridge = CvBridge()
         self.target = target.strip()
         self.confidence = confidence
@@ -53,11 +57,9 @@ class GenericYoloDetector(Node):
         self.ui_socket.bind(UI_STREAM_ENDPOINT)
 
         self.get_logger().info(f"Loading model: {model_path}")
-        self.model = YOLO(str(model_path))
-        self.class_ids, self.class_name = self._resolve_target(self.target)
+        self.load_model(model_path)
         self.get_logger().info(
-            f"Detector ready: target={self.class_name}, class_ids={self.class_ids}, "
-            f"confidence={self.confidence:.2f}"
+            f"Detector ready: target={self.class_name}, confidence={self.confidence:.2f}"
         )
 
         self.image_publisher = self.create_publisher(Image, ANNOTATED_TOPIC, 10)
@@ -66,7 +68,7 @@ class GenericYoloDetector(Node):
             Image,
             COLOR_TOPIC,
             self.image_callback,
-            qos_profile_sensor_data,
+            LATEST_FRAME_QOS,
         )
         self.create_subscription(
             Image,
@@ -80,6 +82,35 @@ class GenericYoloDetector(Node):
             self.camera_info_callback,
             qos_profile_sensor_data,
         )
+
+    def load_model(self, model_path: Path | str) -> None:
+        self.model = YOLO(str(model_path))
+        self.class_ids, self.class_name = self._resolve_target(self.target)
+
+    def detect(self, frame: np.ndarray) -> tuple[list[dict], np.ndarray]:
+        """Return (detections, annotated image). Subclasses swap the model here."""
+        result = self.model.predict(
+            frame,
+            classes=self.class_ids,
+            conf=self.confidence,
+            iou=0.45,
+            verbose=False,
+        )[0]
+        detections = []
+        count = len(result.boxes) if result.boxes is not None else 0
+        for box_index in range(count):
+            class_id = int(result.boxes.cls[box_index].cpu().item())
+            x1, y1, x2, y2 = result.boxes.xyxy[box_index].cpu().tolist()
+            detections.append(
+                {
+                    "class_id": class_id,
+                    "class_name": str(self.model.names[class_id]),
+                    "confidence": float(result.boxes.conf[box_index].cpu().item()),
+                    "bbox": (x1, y1, x2, y2),
+                    "pixel": (int(round((x1 + x2) / 2.0)), int(round((y1 + y2) / 2.0))),
+                }
+            )
+        return detections, result.plot()
 
     def _resolve_target(self, target: str) -> tuple[list[int], str]:
         names = self.model.names
@@ -194,15 +225,8 @@ class GenericYoloDetector(Node):
     def image_callback(self, message: Image) -> None:
         try:
             frame = self.bridge.imgmsg_to_cv2(message, "bgr8")
-            results = self.model.predict(
-                frame,
-                classes=self.class_ids,
-                conf=self.confidence,
-                iou=0.45,
-                verbose=False,
-            )
-            result = results[0]
-            count = len(result.boxes) if result.boxes is not None else 0
+            detections, annotated = self.detect(frame)
+            count = len(detections)
             max_confidence = 0.0
             targets = []
             target_pixel = None
@@ -210,13 +234,12 @@ class GenericYoloDetector(Node):
             position_base_m = None
             base_transform = self.lookup_base_transform()
             if count:
-                for box_index in range(count):
-                    confidence = float(result.boxes.conf[box_index].cpu().item())
-                    class_id = int(result.boxes.cls[box_index].cpu().item())
-                    detected_class = str(self.model.names[class_id])
-                    x1, y1, x2, y2 = result.boxes.xyxy[box_index].cpu().tolist()
-                    u = int(round((x1 + x2) / 2.0))
-                    v = int(round((y1 + y2) / 2.0))
+                for box_index, detection in enumerate(detections):
+                    confidence = detection["confidence"]
+                    class_id = detection["class_id"]
+                    detected_class = detection["class_name"]
+                    x1, y1, x2, y2 = detection["bbox"]
+                    u, v = detection["pixel"]
                     camera_position = self.position_from_pixel(u, v)
                     base_position = None
                     if camera_position is not None and base_transform is not None:
@@ -248,7 +271,6 @@ class GenericYoloDetector(Node):
                 position_camera_m = best["position_camera_m"]
                 position_base_m = best["position_base_m"]
 
-            annotated = result.plot()
             now = time.monotonic()
             fps = 0.0
             if self.last_frame_time is not None:

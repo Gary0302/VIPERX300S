@@ -12,6 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     YOLO_CONFIG_DIR=/workspace/.ultralytics \
+    HF_HOME=/workspace/.hf_cache \
     ROS_DOMAIN_ID=15 \
     ROS_LOCALHOST_ONLY=0
 
@@ -148,9 +149,9 @@ RUN pip3 install --ignore-installed -c /tmp/constraints.txt sympy==1.14.0 "mpmat
 RUN pip3 install -c /tmp/constraints.txt --index-url https://download.pytorch.org/whl/cu128 \
     torch torchvision torchaudio
 
-# 6. 安裝 AI/ML 相關套件
+# 6. 安裝 AI/ML 相關套件（SAM 3 需要 transformers 5 以上）
 RUN pip3 install -c /tmp/constraints.txt \
-    transformers \
+    'transformers>=5.0.0' \
     accelerate \
     bitsandbytes \
     soundfile \

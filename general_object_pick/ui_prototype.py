@@ -344,8 +344,8 @@ class ObjectPickPrototype(QMainWindow):
         grid = QGridLayout(vision)
         grid.addWidget(QLabel("Backend"), 0, 0)
         self.backend_combo = QComboBox()
-        self.backend_combo.addItem("YOLO (Phase 1)", "yolo")
-        self.backend_combo.addItem("SAM 3 (Planned)", "sam3")
+        self.backend_combo.addItem("SAM 3 (Default)", "sam3")
+        self.backend_combo.addItem("YOLO (Old)", "yolo")
         self.backend_combo.currentIndexChanged.connect(self.backend_changed)
         grid.addWidget(self.backend_combo, 0, 1, 1, 2)
 
@@ -365,11 +365,12 @@ class ObjectPickPrototype(QMainWindow):
         self.target_combo.setCurrentText("apple")
         grid.addWidget(self.target_combo, 2, 1, 1, 2)
 
-        self.backend_note = QLabel("YOLO is used first for real-time detection and workflow integration.")
+        self.backend_note = QLabel()
         self.backend_note.setWordWrap(True)
         self.backend_note.setObjectName("hint")
         grid.addWidget(self.backend_note, 3, 0, 1, 3)
         layout.addWidget(vision)
+        self.backend_changed()
 
         grasp = QGroupBox("2. Grasp Settings")
         grasp_grid = QGridLayout(grasp)
@@ -596,13 +597,11 @@ class ObjectPickPrototype(QMainWindow):
         backend = self.backend_combo.currentData()
         if backend == "sam3":
             self.backend_note.setText(
-                "SAM 3 supports text prompts and mask segmentation. It will run as a separate "
-                "service to avoid dependency conflicts with ROS 2 Humble."
+                "SAM 3 finds objects from the words in Target object (e.g. apple, red_apple). "
+                "It does not use the Model list."
             )
         else:
-            self.backend_note.setText(
-                "YOLO is used first for real-time detection and workflow integration."
-            )
+            self.backend_note.setText("YOLO uses the selected Model file from models/.")
 
     def preview_target(self) -> None:
         target = self.target_combo.currentText().strip()
@@ -633,13 +632,10 @@ class ObjectPickPrototype(QMainWindow):
         if self.detector_process is not None:
             self.log("Vision is already running.")
             return
-        if self.backend_combo.currentData() != "yolo":
-            QMessageBox.warning(self, "Backend Unavailable", "SAM 3 is not connected yet.")
-            return
-
+        backend = self.backend_combo.currentData()
         model_path = MODEL_DIR / self.model_combo.currentText()
         target = self.target_combo.currentText().strip()
-        if not model_path.is_file():
+        if backend == "yolo" and not model_path.is_file():
             QMessageBox.warning(self, "Missing Model", f"Model not found: {model_path}")
             return
         if not target:
@@ -650,7 +646,9 @@ class ObjectPickPrototype(QMainWindow):
         self.status_badges["Camera"].set_state("Starting", "warning")
         self.status_badges["Detector"].set_state("Loading", "warning")
         self.image_topic_label.setText("Image: Waiting")
-        self.camera_view.setText("Starting RealSense and loading the YOLO model...")
+        self.camera_view.setText(
+            f"Starting RealSense and loading the {self.backend_combo.currentText()} model..."
+        )
 
         self.image_worker = VisionStreamWorker()
         self.image_worker.image_ready.connect(self.update_image)
@@ -668,16 +666,21 @@ class ObjectPickPrototype(QMainWindow):
         self.detector_process.readyReadStandardOutput.connect(self.read_detector_output)
         self.detector_process.finished.connect(self.detector_finished)
         self.detector_process.errorOccurred.connect(self.detector_process_error)
-        detector_path = Path(__file__).with_name("generic_yolo_detector.py")
-        detector_confidence = (
-            0.55 if model_path.name == "printed_apple_yolo11s.pt" else 0.25
-        )
+        if backend == "sam3":
+            detector_path = Path(__file__).with_name("sam3_detector.py")
+            detector_confidence = 0.5
+            model_args = []
+        else:
+            detector_path = Path(__file__).with_name("generic_yolo_detector.py")
+            detector_confidence = (
+                0.55 if model_path.name == "printed_apple_yolo11s.pt" else 0.25
+            )
+            model_args = ["--model", str(model_path)]
         self.detector_process.start(
             "python3",
             [
                 str(detector_path),
-                "--model",
-                str(model_path),
+                *model_args,
                 "--target",
                 target,
                 "--confidence",
@@ -685,7 +688,7 @@ class ObjectPickPrototype(QMainWindow):
             ],
         )
         self.log(
-            f"Starting YOLO: model={model_path.name}, target={target}, "
+            f"Starting {backend.upper()}: target={target}, "
             f"confidence={detector_confidence:.2f}"
         )
 

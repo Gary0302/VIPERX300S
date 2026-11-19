@@ -37,7 +37,8 @@ general_object_pick/
 ├── auto_label_dataset.py        # YOLO11 自動預標註
 ├── dataset_annotator.py         # PyQt5 人工審查介面
 ├── build_training_dataset.py    # 驗證標註並建立 train/val/test
-├── generic_yolo_detector.py     # YOLO、深度與 TF 座標節點
+├── sam3_detector.py             # SAM 3 辨識節點（預設），沿用下面的深度與 TF 程式
+├── generic_yolo_detector.py     # YOLO、深度與 TF 座標節點（舊方法，保留備用）
 ├── robot_pose_manager.py        # MoveIt、觀察姿勢與夾爪控制
 └── config/
     └── observation_poses.json   # 已儲存的觀察姿勢
@@ -130,8 +131,8 @@ UI 會自行管理相機與辨識器，不需要另外啟動 RealSense 或 `appl
 
 ### 視覺與座標
 
-1. `Backend` 選擇 `YOLO (Phase 1)`。
-2. `Model` 選擇需要的模型；3D 列印紅綠蘋果使用 `printed_apple_yolo11s.pt`，一般 COCO 類別使用 `yolo11s.pt`。
+1. `Backend` 預設為 `SAM 3 (Default)`，直接用 `Target object` 的文字找物品，不使用 `Model` 清單；第一次使用前請先依[根目錄 README](../README.md) 下載 SAM 3。要用舊方法時改選 `YOLO (Old)`。
+2. 只有選 `YOLO (Old)` 時才需要選 `Model`；3D 列印紅綠蘋果使用 `printed_apple_yolo11s.pt`，一般 COCO 類別使用 `yolo11s.pt`。
 3. `Target object` 預設為 `apple`；搭配列印蘋果模型時，可選 `red_apple` 或 `green_apple` 只辨識及夾取指定顏色。也能選擇 `bottle`、`tweezers`，或輸入模型支援的其他類別，但尚未校正的物品只能辨識，不能執行實體夾取。
 4. 按 `Start Vision`。
 5. 等待 Camera 與 Detector 顯示 `Ready`。
